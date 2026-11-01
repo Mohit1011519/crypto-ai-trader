@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <optional>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -187,18 +189,59 @@ std::vector<market::Candle> BinanceExchange::fetch_candles(
     const std::string& symbol,
     const std::string& interval,
     int limit) const {
-    if (symbol.empty() || interval.empty()) {
-        throw std::invalid_argument("symbol and interval must not be empty");
-    }
     if (limit < 1 || limit > 1000) {
         throw std::invalid_argument("Binance candle limit must be between 1 and 1000");
     }
+    return fetch_candle_history(symbol, interval, limit);
+}
+
+std::vector<market::Candle> BinanceExchange::fetch_candle_history(
+    const std::string& symbol,
+    const std::string& interval,
+    const int count) const {
+    if (symbol.empty() || interval.empty()) {
+        throw std::invalid_argument("symbol and interval must not be empty");
+    }
+    if (count < 1) {
+        throw std::invalid_argument("Binance candle count must be positive");
+    }
     const auto escaped_symbol = url_encode(symbol);
     const auto escaped_interval = url_encode(interval);
-    const std::string url = config_.rest_base_url + "/api/v3/klines?symbol=" +
-        escaped_symbol + "&interval=" + escaped_interval + "&limit=" + std::to_string(limit);
-    auto candles = parse_candles(nlohmann::json::parse(request_json(config_, url)));
-    spdlog::info("Fetched {} candles for {} at {}", candles.size(), symbol, interval);
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // Binance returns the still-forming candle last. Live research must match
+    // the backtester, which only ever sees closed bars, so it is dropped.
+    std::vector<market::Candle> candles;
+    std::optional<std::int64_t> end_time;
+    while (candles.size() < static_cast<std::size_t>(count)) {
+        const int remaining = count - static_cast<int>(candles.size());
+        const int request_limit = std::min(1000, remaining + 1);
+        std::string url = config_.rest_base_url + "/api/v3/klines?symbol=" +
+            escaped_symbol + "&interval=" + escaped_interval +
+            "&limit=" + std::to_string(request_limit);
+        if (end_time) {
+            url += "&endTime=" + std::to_string(*end_time);
+        }
+        auto batch = parse_candles(nlohmann::json::parse(request_json(config_, url)));
+        if (batch.empty()) {
+            break;
+        }
+        end_time = batch.front().open_time_ms - 1;
+        const bool exhausted = batch.size() < static_cast<std::size_t>(request_limit);
+        std::erase_if(batch, [&](const market::Candle& candle) {
+            return candle.close_time_ms >= now;
+        });
+        candles.insert(candles.begin(), batch.begin(), batch.end());
+        if (exhausted) {
+            break;
+        }
+    }
+    if (candles.size() > static_cast<std::size_t>(count)) {
+        candles.erase(candles.begin(),
+                      candles.end() - static_cast<std::ptrdiff_t>(count));
+    }
+    spdlog::debug("Fetched {} closed candles for {} at {}", candles.size(), symbol, interval);
     return candles;
 }
 

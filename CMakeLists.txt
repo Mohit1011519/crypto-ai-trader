@@ -33,9 +33,14 @@ add_library(crypto_trader
     src/ai/signal_engine.cpp
     src/common/config.cpp
     src/common/logger.cpp
+    src/common/notifier.cpp
     src/execution/order_executor.cpp
     src/exchange/binance_exchange.cpp
     src/exchange/binance_market_stream.cpp
+    src/exchange/binance_signed_client.cpp
+    src/execution/binance_spot_venue.cpp
+    src/execution/paper_venue.cpp
+    src/live/live_trader.cpp
     src/indicators/technical_indicators.cpp
     src/market/market_scanner.cpp
     src/market/order_book_analysis.cpp
@@ -43,7 +48,7 @@ add_library(crypto_trader
     src/market/volatility_analysis.cpp
     src/market/volume_analysis.cpp
     src/ml/ml_evaluator.cpp
-    src/paper/paper_portfolio.cpp
+    src/risk/exit_rules.cpp
     src/risk/risk_manager.cpp
 )
 
@@ -81,11 +86,13 @@ if(BUILD_TESTING)
 
     add_executable(crypto_trader_tests
         tests/config_tests.cpp
+        tests/exit_rules_tests.cpp
+        tests/live_trader_tests.cpp
+        tests/paper_venue_tests.cpp
         tests/order_executor_tests.cpp
         tests/backtester_tests.cpp
         tests/market_research_tests.cpp
         tests/ml_evaluator_tests.cpp
-        tests/paper_portfolio_tests.cpp
         tests/risk_manager_tests.cpp
         tests/signal_engine_tests.cpp
     )

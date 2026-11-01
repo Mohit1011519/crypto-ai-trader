@@ -23,6 +23,10 @@ struct PortfolioRiskSnapshot {
     double peak_equity;
     int open_positions;
     std::vector<std::string> open_symbols;
+    // UTC trading day (YYYY-MM-DD). When set, a daily-loss breach pauses new
+    // entries until the day changes instead of latching a full shutdown;
+    // only the drawdown limit latches. Empty keeps the legacy latch.
+    std::string utc_day = {};
 };
 
 struct OrderIntent {
@@ -57,6 +61,7 @@ struct RiskStatus {
     double daily_loss_fraction;
     double drawdown_fraction;
     std::vector<std::string> reasons;
+    bool daily_pause = false;
 };
 
 class RiskManager {
@@ -73,6 +78,7 @@ private:
     mutable std::mutex mutex_;
     bool emergency_shutdown_ = false;
     std::vector<std::string> shutdown_reasons_;
+    std::string paused_day_;
 };
 
 }  // namespace crypto_trader::risk

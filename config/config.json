@@ -2,8 +2,8 @@
   "exchange": "binance",
   "mode": "paper",
   "live_order_submission_enabled": false,
-  "paper_initial_balance": 10000.0,
-  "paper_state_path": "data/paper_portfolio.json",
+  "paper_initial_balance": 100.0,
+  "paper_state_path": "data/paper_trader.json",
   "rest_base_url": "https://api.binance.com",
   "websocket_host": "stream.binance.com",
   "websocket_port": "9443",
@@ -15,8 +15,8 @@
     "BNBUSDT",
     "XRPUSDT"
   ],
-  "candle_interval": "1m",
-  "candle_limit": 500,
+  "candle_interval": "4h",
+  "candle_limit": 1000,
   "request_timeout_seconds": 15,
   "reconnect_delay_seconds": 5,
   "log_level": "info",
@@ -36,9 +36,9 @@
     "volume_spike_multiple": 2.0,
     "support_resistance_period": 50,
     "historical_volatility_period": 30,
-    "normal_volatility_threshold": 0.01,
-    "high_volatility_threshold": 0.03,
-    "sudden_volatility_multiple": 2.5,
+    "normal_volatility_threshold": 0.02,
+    "high_volatility_threshold": 0.06,
+    "sudden_volatility_multiple": 100.0,
     "order_book_depth": 20,
     "large_order_multiple": 3.0,
     "minimum_quote_liquidity": 10000.0,
@@ -47,32 +47,42 @@
   "signals": {
     "weights": {
       "trend": 0.25,
-      "momentum": 0.30,
+      "momentum": 0.3,
       "volume": 0.15,
-      "volatility": 0.10,
-      "order_book": 0.20,
+      "volatility": 0.1,
+      "order_book": 0.2,
       "sentiment": 0.0
     },
     "minimum_signal_score": 0.35,
-    "minimum_research_quality": 0.80,
+    "minimum_research_quality": 0.8,
     "minimum_research_coverage": 0.65,
     "minimum_confirmations": 2,
-    "minimum_reward_risk_ratio": 1.50,
-    "target_atr_multiple": 3.0,
-    "stop_atr_multiple": 1.5,
+    "minimum_reward_risk_ratio": 1.5,
+    "target_atr_multiple": 10.0,
+    "stop_atr_multiple": 2.0,
     "taker_fee_rate": 0.001,
     "slippage_rate": 0.0005,
-    "maximum_spread_percent": 0.005
+    "maximum_spread_percent": 0.001,
+    "require_bullish_trend_for_buy": true,
+    "require_breakout_for_buy": true,
+    "suppress_repeated_direction": false
   },
   "risk": {
-    "risk_per_trade_fraction": 0.005,
+    "risk_per_trade_fraction": 0.0025,
     "maximum_open_positions": 3,
     "daily_maximum_loss_fraction": 0.02,
-    "maximum_drawdown_fraction": 0.10,
+    "maximum_drawdown_fraction": 0.1,
     "maximum_gross_exposure_fraction": 1.0,
-    "stop_atr_multiple": 1.5,
-    "target_atr_multiple": 3.0,
+    "stop_atr_multiple": 2.0,
+    "target_atr_multiple": 10.0,
     "taker_fee_rate": 0.001,
-    "slippage_rate": 0.0005
-  }
+    "slippage_rate": 0.0005,
+    "trailing_stop_atr_multiple": 4.0,
+    "breakeven_trigger_r": 1.5
+  },
+  "backtest": {
+    "candle_count": 6500,
+    "spread_fraction": 0.0002
+  },
+  "log_file": "logs/paper.log"
 }

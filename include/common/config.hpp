@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,16 @@ struct SignalSettings {
     double taker_fee_rate;
     double slippage_rate;
     double maximum_spread_percent;
+    // Spot is long-only, so buys are only taken in the direction of an
+    // established EMA uptrend ("trade with the flow").
+    bool require_bullish_trend_for_buy = true;
+    // Legacy behaviour: suppress a BUY/SELL until the opposite direction is
+    // emitted. When false, only a re-evaluation of the same closed candle is
+    // suppressed, which allows re-entry after a protective exit.
+    bool suppress_repeated_direction = true;
+    // Require the last close to break above the prior support/resistance
+    // window high (Donchian breakout) before buying.
+    bool require_breakout_for_buy = false;
 };
 
 struct RiskSettings {
@@ -62,6 +73,43 @@ struct RiskSettings {
     double target_atr_multiple;
     double taker_fee_rate;
     double slippage_rate;
+    // Chandelier trailing stop: highest close since entry minus this many
+    // current ATRs. Zero disables trailing.
+    double trailing_stop_atr_multiple = 0.0;
+    // Move the stop to break-even (entry plus round-trip costs) once the
+    // highest close reaches entry plus this multiple of the initial risk.
+    // Zero disables the break-even rule.
+    double breakeven_trigger_r = 0.0;
+};
+
+struct BacktestSettings {
+    // Total closed candles fetched (paged) for --backtest.
+    int candle_count = 1000;
+    // Spread assumed for simulated fills when historical books are
+    // unavailable. Unset means the conservative maximum_spread_percent.
+    std::optional<double> spread_fraction;
+};
+
+// Order execution against Binance Spot Testnet. Mainnet order endpoints are
+// rejected by configuration validation. API credentials are read from the
+// BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET environment variables
+// and are never stored in configuration or state files.
+struct LiveSettings {
+    std::string order_base_url = "https://testnet.binance.vision";
+    std::filesystem::path state_path = "data/testnet_portfolio.json";
+    std::string quote_asset = "USDT";
+    // Starting quote capital the bot manages. Its ledger grows with profits and
+    // shrinks with losses; the bot never spends more than that ledger or the
+    // account's free balance, so other funds in the account are untouched.
+    double capital_allocation = 1000.0;
+    // Hard cap on a single entry order's notional.
+    double maximum_order_notional = 250.0;
+    // Only replace the exchange stop when the ratcheted stop has risen by at
+    // least this fraction, limiting cancel/replace churn.
+    double stop_update_minimum_fraction = 0.002;
+    // Sell every position when the daily-loss or drawdown limit trips.
+    bool flatten_on_risk_shutdown = true;
+    int receive_window_ms = 5000;
 };
 
 struct AppConfig {
@@ -77,12 +125,16 @@ struct AppConfig {
     int request_timeout_seconds;
     int reconnect_delay_seconds;
     std::string log_level;
+    // Empty disables the log file.
+    std::string log_file = "";
     ResearchSettings research;
     SignalSettings signals;
     RiskSettings risk;
     double paper_initial_balance;
     std::filesystem::path paper_state_path;
     bool live_order_submission_enabled;
+    BacktestSettings backtest{};
+    LiveSettings live{};
 };
 
 AppConfig parse_config(const nlohmann::json& json);

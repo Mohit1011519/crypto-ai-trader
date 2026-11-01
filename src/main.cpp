@@ -1,12 +1,16 @@
 #include "common/config.hpp"
 #include "common/logger.hpp"
+#include "common/notifier.hpp"
 #include "backtest/backtester.hpp"
 #include "execution/order_executor.hpp"
 #include "exchange/binance_exchange.hpp"
 #include "exchange/binance_market_stream.hpp"
+#include "exchange/binance_signed_client.hpp"
+#include "execution/paper_venue.hpp"
+#include "execution/spot_venue.hpp"
+#include "live/live_trader.hpp"
 #include "market/market_scanner.hpp"
 #include "ml/ml_evaluator.hpp"
-#include "paper/paper_portfolio.hpp"
 #include "risk/risk_manager.hpp"
 
 #include <algorithm>
@@ -15,8 +19,10 @@
 #include <csignal>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <cmath>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,9 +48,16 @@ void print_usage() {
               << "  crypto-ai-trader --paper [config-path]\n"
               << "  crypto-ai-trader --paper-status [config-path]\n"
               << "  crypto-ai-trader --paper-reset [config-path]\n"
+              << "  crypto-ai-trader --paper-flatten [config-path]\n"
               << "  crypto-ai-trader --backtest SYMBOL [config-path]\n"
+              << "  crypto-ai-trader --backtest-all [config-path]\n"
               << "  crypto-ai-trader --ml-evaluate SYMBOL [config-path]\n"
               << "  crypto-ai-trader --execution-status [config-path]\n"
+              << "  crypto-ai-trader --live-once [config-path]      (testnet orders)\n"
+              << "  crypto-ai-trader --live [config-path]           (testnet orders)\n"
+              << "  crypto-ai-trader --live-status [config-path]\n"
+              << "  crypto-ai-trader --live-flatten [config-path]   (sell all, halt)\n"
+              << "  crypto-ai-trader --live-reset [config-path]\n"
               << "  crypto-ai-trader --execution-dry-run SYMBOL buy|sell QUANTITY [config-path]\n"
               << "  crypto-ai-trader --help\n";
 }
@@ -263,80 +276,210 @@ int scan_markets(const crypto_trader::common::AppConfig& config, const bool repe
     return 0;
 }
 
-void print_paper_account(
-    const crypto_trader::paper::PaperPortfolioView& account,
-    const std::vector<crypto_trader::paper::PaperExecution>& executions) {
-    std::cout << "\nPaper Account"
-              << " Cash=" << std::fixed << std::setprecision(2) << account.cash_balance
+// Plain-language explanation of what the bot decided for one market.
+std::string decision_text(const crypto_trader::market::ScanResult& result) {
+    using crypto_trader::market::TrendDirection;
+    if (result.candle_error || !result.trend || !result.technical) {
+        return "No data: " + result.candle_error.value_or("research unavailable");
+    }
+    if (result.signal && result.signal->action == crypto_trader::ai::Signal::buy) {
+        return "BUY signal: uptrend breakout confirmed";
+    }
+    std::ostringstream text;
+    switch (result.trend->direction) {
+    case TrendDirection::bearish:
+        return "Downtrend: not buying (open positions here are sold)";
+    case TrendDirection::sideways:
+        return result.signal && result.signal->exit_long
+            ? "Trend weakening: not buying (open positions here are sold)"
+            : "No clear trend: not buying";
+    case TrendDirection::unavailable:
+        return "Not enough history yet";
+    case TrendDirection::bullish:
+        break;
+    }
+    if (!result.trend->breakout_up && result.trend->resistance) {
+        text << "Uptrend: waiting for breakout above " << std::fixed
+             << std::setprecision(result.technical->close < 10.0 ? 4 : 2)
+             << *result.trend->resistance;
+        return text.str();
+    }
+    if (result.signal && !result.signal->reasons.empty()) {
+        return "Uptrend, but filtered: " + result.signal->reasons.front();
+    }
+    return "Uptrend: no signal";
+}
+
+void print_market_summary(const std::vector<crypto_trader::market::ScanResult>& results,
+                          const int next_check_seconds) {
+    std::ostringstream table;
+    table << "\n---- Market check (strategy: " << results.size()
+          << " coins, buys only in uptrend breakouts) ----\n";
+    for (const auto& result : results) {
+        const auto action = result.signal &&
+            result.signal->action == crypto_trader::ai::Signal::buy ? "BUY" : "WAIT";
+        table << std::left << std::setw(9) << result.symbol << ' ';
+        if (result.technical) {
+            table << std::right << std::setw(12) << std::fixed
+                  << std::setprecision(result.technical->close < 10.0 ? 4 : 2)
+                  << result.technical->close;
+        } else {
+            table << std::setw(12) << "-";
+        }
+        table << "  " << std::left << std::setw(4) << action << "  "
+              << decision_text(result) << '\n';
+        spdlog::info("{} {} {}", result.symbol, action, decision_text(result));
+    }
+    if (next_check_seconds > 0) {
+        table << "Next check in " << next_check_seconds
+              << "s (signals update when each 4h candle closes).\n";
+    }
+    std::cout << table.str();
+}
+
+void print_live_account(const char* label,
+                        const crypto_trader::live::LiveAccountView& account,
+                        const std::vector<crypto_trader::live::LiveExecution>& executions) {
+    std::cout << '\n' << label << " Account"
+              << " Allocation=" << std::fixed << std::setprecision(2)
+              << account.capital_allocation
+              << " Cash=" << account.cash_balance
               << " Equity=" << account.equity
+              << " Return=" << (account.equity / account.capital_allocation - 1.0) * 100.0 << '%'
               << " GrossExposure=" << account.gross_exposure
-              << " UnrealizedPnL=" << account.unrealized_pnl
               << " DailyPnL=" << account.daily_net_pnl
               << " PeakEquity=" << account.peak_equity
-              << " Trading=" << (account.trading_halted ? "HALTED" : "ENABLED")
-              << '\n';
+              << " Trading=" << (account.trading_halted ? "HALTED" : "ENABLED") << '\n';
     for (const auto& position : account.positions) {
         std::cout << "  " << position.symbol
                   << " Qty=" << std::setprecision(8) << position.quantity
                   << " Entry=" << std::setprecision(4) << position.entry_price
                   << " Mark=" << position.mark_price
                   << " Stop=" << position.stop_loss_price
-                  << " Target=" << position.take_profit_price << '\n';
+                  << " ExchangeStop=" << position.exchange_stop_price
+                  << " (order " << position.stop_order_id << ")"
+                  << " Target=" << position.take_profit_price
+                  << " UnrealizedPnL=" << std::setprecision(2)
+                  << position.quantity * position.mark_price - position.entry_cost << '\n';
     }
     for (const auto& execution : executions) {
-        std::cout << "  Simulated " << execution.side << ' ' << execution.symbol
+        std::cout << "  " << label << ' ' << execution.side << ' ' << execution.symbol
                   << " Qty=" << std::setprecision(8) << execution.quantity
                   << " Price=" << std::setprecision(4) << execution.price
                   << " Fee=" << execution.fee
                   << " RealizedPnL=" << execution.realized_pnl
+                  << " Order=" << execution.order_id
                   << " Reason=[" << execution.reason << "]\n";
     }
 }
 
-int run_paper(const crypto_trader::common::AppConfig& config,
-              const std::string& command) {
-    crypto_trader::paper::PaperPortfolio portfolio(
-        config.paper_state_path,
-        config.paper_initial_balance,
-        config.risk,
-        config.signals.maximum_spread_percent);
+int run_trader(const crypto_trader::common::AppConfig& config, const std::string& command) {
+    const bool paper = command.rfind("--paper", 0) == 0;
+    const std::string action = command.substr(paper ? 7 : 6);
+    if (!paper && config.mode != "testnet") {
+        throw std::invalid_argument(
+            "Live commands require mode 'testnet' and live_order_submission_enabled: true "
+            "(see config/testnet.json)");
+    }
 
-    if (command == "--paper-status") {
-        print_paper_account(portfolio.view(), {});
-        std::cout << "Execution history: " << portfolio.execution_history().size()
-                  << " records. State: " << config.paper_state_path.string() << '\n';
+    // Paper and testnet run the same LiveTrader; only the venue differs.
+    auto settings = config.live;
+    std::unique_ptr<crypto_trader::exchange::BinanceSignedClient> client;
+    std::unique_ptr<crypto_trader::execution::SpotVenue> market_data;
+    std::unique_ptr<crypto_trader::execution::SpotVenue> venue;
+    if (paper) {
+        settings.state_path = config.paper_state_path;
+        settings.capital_allocation = config.paper_initial_balance;
+        settings.maximum_order_notional =
+            std::min(settings.maximum_order_notional, config.paper_initial_balance);
+        client = std::make_unique<crypto_trader::exchange::BinanceSignedClient>(
+            config.rest_base_url, crypto_trader::exchange::ApiCredentials{},
+            config.request_timeout_seconds, settings.receive_window_ms);
+        market_data = std::make_unique<crypto_trader::execution::BinanceSpotVenue>(*client);
+        auto venue_path = config.paper_state_path;
+        venue_path.replace_extension(".venue.json");
+        venue = std::make_unique<crypto_trader::execution::PaperVenue>(
+            *market_data, venue_path, settings.quote_asset, config.paper_initial_balance,
+            config.risk.taker_fee_rate, config.risk.slippage_rate);
+    } else {
+        client = std::make_unique<crypto_trader::exchange::BinanceSignedClient>(
+            settings.order_base_url, crypto_trader::exchange::credentials_from_environment(),
+            config.request_timeout_seconds, settings.receive_window_ms);
+        venue = std::make_unique<crypto_trader::execution::BinanceSpotVenue>(*client);
+    }
+    const char* label = paper ? "Paper" : "Testnet";
+    crypto_trader::risk::RiskManager risk_manager(config.risk);
+    crypto_trader::live::LiveTrader trader(settings, config.risk, *venue);
+
+    if (action == "-status") {
+        print_live_account(label, trader.view(), {});
+        return 0;
+    }
+    if (action == "-flatten") {
+        const auto executions = trader.flatten("manual flatten");
+        print_live_account(label, trader.view(), executions);
+        std::cout << "All bot positions sold and trading halted. Use "
+                  << (paper ? "--paper-reset" : "--live-reset") << " to resume.\n";
+        return 0;
+    }
+    if (action == "-reset") {
+        trader.reset_risk_shutdown(risk_manager);
+        print_live_account(label, trader.view(), {});
+        std::cout << "Trading re-enabled.\n";
         return 0;
     }
 
-    crypto_trader::risk::RiskManager risk_manager(config.risk);
+    // Signals always use real (mainnet) public market data.
     crypto_trader::exchange::BinanceExchange exchange(config);
     crypto_trader::market::MarketScanner scanner(exchange, config);
-    if (command == "--paper-reset") {
-        const auto results = scanner.scan_once();
-        print_scan(results, true);
-        auto mark_only_results = results;
-        for (auto& result : mark_only_results) {
-            if (result.signal) {
-                result.signal->action = crypto_trader::ai::Signal::hold;
+    const auto notifier = crypto_trader::common::Notifier::from_environment();
+    const bool repeat = action.empty();
+    bool was_halted = trader.view().trading_halted;
+    std::string last_error;
+    const auto on_scan = [&](const std::vector<crypto_trader::market::ScanResult>& results) {
+        try {
+            print_market_summary(results, repeat ? config.research.scan_interval_seconds : 0);
+            const auto executions = trader.process_scan(results, risk_manager);
+            const auto account = trader.view();
+            print_live_account(label, account, executions);
+            for (const auto& execution : executions) {
+                std::ostringstream alert;
+                alert << label << ' ' << execution.side << ' ' << execution.symbol
+                      << " qty " << execution.quantity << " @ " << execution.price
+                      << " (" << execution.reason << ")";
+                if (execution.side == "SELL") {
+                    alert << " P/L " << std::fixed << std::setprecision(2)
+                          << execution.realized_pnl;
+                }
+                alert << std::fixed << std::setprecision(2) << " | equity " << account.equity;
+                notifier.send(alert.str());
+            }
+            if (account.trading_halted && !was_halted) {
+                notifier.send(std::string(label) + " bot HALTED by risk limits; equity " +
+                              std::to_string(account.equity) + ". Review before resetting.");
+            }
+            was_halted = account.trading_halted;
+            last_error.clear();
+        } catch (const std::exception& error) {
+            // Exchange-resident stops keep positions protected while the next
+            // cycle retries; a transient network error must not stop the bot.
+            spdlog::error("Trading cycle failed: {}", error.what());
+            if (error.what() != last_error) {
+                notifier.send(std::string(label) + " bot error: " + error.what());
+                last_error = error.what();
             }
         }
-        portfolio.process_scan(mark_only_results, risk_manager);
-        portfolio.reset_risk_shutdown(risk_manager);
-        print_paper_account(portfolio.view(), {});
-        return 0;
-    }
-
-    const auto on_scan = [&](const std::vector<crypto_trader::market::ScanResult>& results) {
-        print_scan(results, true);
-        const auto executions = portfolio.process_scan(results, risk_manager);
-        print_paper_account(portfolio.view(), executions);
     };
-    if (command == "--paper") {
+    if (repeat) {
+        notifier.send(std::string(label) + " bot started: " +
+                      std::to_string(config.trading_pairs.size()) + " markets, equity " +
+                      std::to_string(trader.view().equity));
+    }
+    if (repeat) {
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
-        spdlog::info("Paper simulation scanning {} configured markets every {} seconds. "
-                     "Press Ctrl+C to stop.",
-                     config.trading_pairs.size(), config.research.scan_interval_seconds);
+        spdlog::info("{} trading {} markets. Press Ctrl+C to stop; stops stay active.",
+                     label, config.trading_pairs.size());
         scanner.run(stop_requested, on_scan);
         return 0;
     }
@@ -344,15 +487,8 @@ int run_paper(const crypto_trader::common::AppConfig& config,
     return 0;
 }
 
-int run_backtest(const crypto_trader::common::AppConfig& config,
-                 const std::string& symbol) {
-    crypto_trader::exchange::BinanceExchange exchange(config);
-    const auto candles = exchange.fetch_candles(
-        symbol, config.candle_interval, config.candle_limit);
-    const auto result = crypto_trader::backtest::Backtester(config).run(symbol, candles);
-
-    std::cout << "\nHistorical Backtest (public candles; simulated fills only)\n"
-              << "Symbol=" << result.symbol
+void print_backtest_summary(const crypto_trader::backtest::BacktestResult& result) {
+    std::cout << "Symbol=" << result.symbol
               << " Candles=" << result.candles_processed
               << " StartingEquity=" << std::fixed << std::setprecision(2)
               << result.initial_equity
@@ -368,6 +504,28 @@ int run_backtest(const crypto_trader::common::AppConfig& config,
               << " ProfitFactor=";
     print_optional(result.profit_factor);
     std::cout << " RiskShutdown=" << (result.risk_shutdown ? "YES" : "NO") << '\n';
+}
+
+void print_backtest_footnote(const crypto_trader::common::AppConfig& config) {
+    const double spread = config.backtest.spread_fraction.value_or(
+        config.signals.maximum_spread_percent);
+    std::cout << "Signals use completed bars; entries are at the next bar open. "
+                 "If stop and target both touch within one bar, stop is assumed first. "
+                 "Order-book history is unavailable; an assumed spread of "
+              << std::setprecision(4) << spread * 100.0
+              << "% is charged on every fill. "
+                 "Results are historical simulation, not a profit forecast.\n";
+}
+
+int run_backtest(const crypto_trader::common::AppConfig& config,
+                 const std::string& symbol) {
+    crypto_trader::exchange::BinanceExchange exchange(config);
+    const auto candles = exchange.fetch_candle_history(
+        symbol, config.candle_interval, config.backtest.candle_count);
+    const auto result = crypto_trader::backtest::Backtester(config).run(symbol, candles);
+
+    std::cout << "\nHistorical Backtest (public candles; simulated fills only)\n";
+    print_backtest_summary(result);
     for (const auto& trade : result.trades) {
         std::cout << trade.symbol << ' ' << trade.exit_reason
                   << " Qty=" << std::setprecision(8) << trade.quantity
@@ -376,10 +534,53 @@ int run_backtest(const crypto_trader::common::AppConfig& config,
                   << " Fees=" << trade.fees
                   << " NetPnL=" << trade.net_pnl << '\n';
     }
-    std::cout << "Signals use completed bars; entries are at the next bar open. "
-                 "If stop and target both touch within one bar, stop is assumed first. "
-                 "Order-book history is unavailable; configured maximum spread is used. "
-                 "Results are historical simulation, not a profit forecast.\n";
+    print_backtest_footnote(config);
+    return 0;
+}
+
+int run_backtest_all(const crypto_trader::common::AppConfig& config) {
+    crypto_trader::exchange::BinanceExchange exchange(config);
+    std::vector<std::vector<crypto_trader::market::Candle>> candles;
+    std::vector<crypto_trader::backtest::MarketHistory> markets;
+    candles.reserve(config.trading_pairs.size());
+    for (const auto& symbol : config.trading_pairs) {
+        candles.push_back(exchange.fetch_candle_history(
+            symbol, config.candle_interval, config.backtest.candle_count));
+    }
+    for (std::size_t index = 0; index < candles.size(); ++index) {
+        markets.push_back({config.trading_pairs[index], candles[index]});
+    }
+    const auto result = crypto_trader::backtest::Backtester(config).run_portfolio(markets);
+
+    std::cout << "\nPortfolio Backtest: all pairs share one account (simulated fills only)\n"
+              << std::fixed << std::setprecision(2)
+              << "StartingEquity=" << result.initial_equity
+              << " FinalEquity=" << result.final_equity
+              << " Return=" << result.total_return_fraction * 100.0 << '%'
+              << " EqualWeightBuyAndHold=" << result.buy_and_hold_return_fraction * 100.0 << '%'
+              << "\nMaxDrawdown=" << result.maximum_drawdown_fraction * 100.0 << '%'
+              << " WorstDay=" << result.worst_day_return_fraction * 100.0 << '%'
+              << " MaxConcurrentPositions=" << result.maximum_concurrent_positions
+              << " Trades=" << result.completed_trades
+              << " Wins=" << result.winning_trades
+              << " Losses=" << result.losing_trades
+              << " ProfitFactor=";
+    print_optional(result.profit_factor);
+    std::cout << " RiskShutdown=" << (result.risk_shutdown ? "YES" : "NO") << '\n';
+    std::cout << "Return by year:";
+    for (const auto& year : result.yearly_returns) {
+        std::cout << ' ' << year.year << '=' << year.return_fraction * 100.0 << '%';
+    }
+    std::cout << "\nNet P/L by pair:";
+    for (const auto& symbol : config.trading_pairs) {
+        double pnl = 0.0;
+        for (const auto& trade : result.trades) {
+            pnl += trade.symbol == symbol ? trade.net_pnl : 0.0;
+        }
+        std::cout << ' ' << symbol << '=' << pnl;
+    }
+    std::cout << '\n';
+    print_backtest_footnote(config);
     return 0;
 }
 
@@ -441,7 +642,10 @@ int show_execution_status(const crypto_trader::common::AppConfig& config) {
               << "Dry-run interface: available (simulated preview only)\n"
               << "Live order submission: "
               << (config.live_order_submission_enabled ? "ENABLED" : "DISABLED") << '\n'
-              << "Live order adapter: unavailable; all live submissions are rejected\n";
+              << "Testnet order adapter: "
+              << (config.mode == "testnet" ? config.live.order_base_url : "inactive (paper mode)")
+              << '\n'
+              << "Mainnet order submission: not enabled; configuration rejects it\n";
     return 0;
 }
 
@@ -493,7 +697,10 @@ int main(int argc, char* argv[]) {
         const bool scanner_command = command == "--scan" || command == "--scan-once" ||
             command == "--paper" || command == "--paper-once" ||
             command == "--paper-status" || command == "--paper-reset" ||
-            command == "--execution-status";
+            command == "--paper-flatten" ||
+            command == "--execution-status" || command == "--backtest-all" ||
+            command == "--live-once" || command == "--live" || command == "--live-status" ||
+            command == "--live-flatten" || command == "--live-reset";
         const bool dry_run_command = command == "--execution-dry-run";
         if (scanner_command && (argc < 2 || argc > 3)) {
             print_usage();
@@ -513,17 +720,22 @@ int main(int argc, char* argv[]) {
                 ? (argc == 6 ? argv[5] : "config/config.json")
                 : (argc == 4 ? argv[3] : "config/config.json");
         const auto config = crypto_trader::common::load_config(config_path);
-        crypto_trader::common::initialize_logging(config.log_level);
+        crypto_trader::common::initialize_logging(config.log_level, config.log_file);
 
         if (command == "--scan-once" || command == "--scan") {
             return scan_markets(config, command == "--scan");
         }
-        if (command == "--paper-once" || command == "--paper" ||
-            command == "--paper-status" || command == "--paper-reset") {
-            return run_paper(config, command);
+        if (command.rfind("--paper", 0) == 0) {
+            return run_trader(config, command);
         }
         if (command == "--execution-status") {
             return show_execution_status(config);
+        }
+        if (command == "--backtest-all") {
+            return run_backtest_all(config);
+        }
+        if (command.rfind("--live", 0) == 0) {
+            return run_trader(config, command);
         }
         if (dry_run_command) {
             const std::string symbol = argv[2];

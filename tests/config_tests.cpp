@@ -176,3 +176,68 @@ TEST(ConfigTests, RejectsEnablingLiveOrderSubmission) {
     config["live_order_submission_enabled"] = true;
     EXPECT_THROW(crypto_trader::common::parse_config(config), std::invalid_argument);
 }
+
+TEST(ConfigTests, ParsesOptionalStrategyAndBacktestSettings) {
+    const auto defaults = crypto_trader::common::parse_config(valid_config());
+    EXPECT_TRUE(defaults.signals.require_bullish_trend_for_buy);
+    EXPECT_TRUE(defaults.signals.suppress_repeated_direction);
+    EXPECT_FALSE(defaults.signals.require_breakout_for_buy);
+    EXPECT_DOUBLE_EQ(defaults.risk.trailing_stop_atr_multiple, 0.0);
+    EXPECT_EQ(defaults.backtest.candle_count, 1000);
+    EXPECT_FALSE(defaults.backtest.spread_fraction.has_value());
+
+    auto json = valid_config();
+    json["signals"]["require_breakout_for_buy"] = true;
+    json["signals"]["suppress_repeated_direction"] = false;
+    json["risk"]["trailing_stop_atr_multiple"] = 4.0;
+    json["risk"]["breakeven_trigger_r"] = 1.5;
+    json["backtest"] = {{"candle_count", 6500}, {"spread_fraction", 0.0002}};
+    const auto config = crypto_trader::common::parse_config(json);
+    EXPECT_TRUE(config.signals.require_breakout_for_buy);
+    EXPECT_FALSE(config.signals.suppress_repeated_direction);
+    EXPECT_DOUBLE_EQ(config.risk.trailing_stop_atr_multiple, 4.0);
+    EXPECT_DOUBLE_EQ(config.risk.breakeven_trigger_r, 1.5);
+    EXPECT_EQ(config.backtest.candle_count, 6500);
+    EXPECT_DOUBLE_EQ(config.backtest.spread_fraction.value(), 0.0002);
+}
+
+TEST(ConfigTests, RejectsInvalidTrailingAndBacktestSettings) {
+    auto trailing = valid_config();
+    trailing["risk"]["trailing_stop_atr_multiple"] = -1.0;
+    EXPECT_THROW(crypto_trader::common::parse_config(trailing), std::invalid_argument);
+
+    auto spread = valid_config();
+    spread["backtest"] = {{"spread_fraction", 1.5}};
+    EXPECT_THROW(crypto_trader::common::parse_config(spread), std::invalid_argument);
+
+    auto count = valid_config();
+    count["backtest"] = {{"candle_count", 1}};
+    EXPECT_THROW(crypto_trader::common::parse_config(count), std::invalid_argument);
+}
+
+TEST(ConfigTests, TestnetModeRequiresExplicitOptInAndTestnetOrderEndpoint) {
+    auto testnet = valid_config();
+    testnet["mode"] = "testnet";
+    testnet["live_order_submission_enabled"] = true;
+    testnet["live"] = {{"capital_allocation", 500.0}, {"maximum_order_notional", 100.0}};
+    const auto config = crypto_trader::common::parse_config(testnet);
+    EXPECT_EQ(config.mode, "testnet");
+    EXPECT_DOUBLE_EQ(config.live.capital_allocation, 500.0);
+    EXPECT_EQ(config.live.order_base_url, "https://testnet.binance.vision");
+
+    auto not_opted_in = testnet;
+    not_opted_in["live_order_submission_enabled"] = false;
+    EXPECT_THROW(crypto_trader::common::parse_config(not_opted_in), std::invalid_argument);
+
+    auto mainnet = testnet;
+    mainnet["live"]["order_base_url"] = "https://api.binance.com";
+    EXPECT_THROW(crypto_trader::common::parse_config(mainnet), std::invalid_argument);
+
+    auto oversized_order = testnet;
+    oversized_order["live"]["maximum_order_notional"] = 1000.0;
+    EXPECT_THROW(crypto_trader::common::parse_config(oversized_order), std::invalid_argument);
+
+    auto wrong_quote = testnet;
+    wrong_quote["trading_pairs"] = {"ETHBTC"};
+    EXPECT_THROW(crypto_trader::common::parse_config(wrong_quote), std::invalid_argument);
+}

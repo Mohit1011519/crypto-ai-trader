@@ -115,6 +115,12 @@ TradingSignal SignalEngine::evaluate(const market::ScanResult& research) {
         return result;
     }
 
+    // Long exits use the medium EMA: a fast-EMA cross below it with price
+    // underneath means the uptrend that justified the entry has broken.
+    result.exit_long = technical.ema_fast && technical.ema_medium &&
+        *technical.ema_fast < *technical.ema_medium &&
+        technical.close < *technical.ema_medium;
+
     double trend_score = 0.0;
     bool trend_available = false;
     switch (trend.direction) {
@@ -265,6 +271,17 @@ TradingSignal SignalEngine::evaluate(const market::ScanResult& research) {
         return result;
     }
 
+    if (result.research_score > 0.0 && settings_.require_bullish_trend_for_buy &&
+        trend.direction != market::TrendDirection::bullish) {
+        add_reason(result.reasons, "Buy requires an aligned bullish EMA trend");
+        return result;
+    }
+    if (result.research_score > 0.0 && settings_.require_breakout_for_buy &&
+        !trend.breakout_up) {
+        add_reason(result.reasons, "Buy requires a close above the prior range high");
+        return result;
+    }
+
     result.action = result.research_score > 0.0 ? Signal::buy : Signal::sell;
     add_reason(result.reasons, "Weighted, multi-component research supports this direction");
     add_reason(result.reasons, research.order_book
@@ -275,11 +292,18 @@ TradingSignal SignalEngine::evaluate(const market::ScanResult& research) {
     {
         std::lock_guard lock(mutex_);
         const auto previous = last_emitted_signal_.find(research.symbol);
-        if (previous != last_emitted_signal_.end() && previous->second == result.action) {
+        const bool repeated = previous != last_emitted_signal_.end() &&
+            previous->second.action == result.action &&
+            (settings_.suppress_repeated_direction ||
+             previous->second.timestamp_ms == result.metadata.timestamp_ms);
+        if (repeated) {
             result.action = Signal::hold;
-            add_reason(result.reasons, "Repeated signal suppressed; existing positions are not tracked");
+            add_reason(result.reasons, settings_.suppress_repeated_direction
+                ? "Repeated signal suppressed; existing positions are not tracked"
+                : "Signal already emitted for this closed candle");
         } else {
-            last_emitted_signal_.insert_or_assign(research.symbol, result.action);
+            last_emitted_signal_.insert_or_assign(
+                research.symbol, EmittedSignal{result.action, result.metadata.timestamp_ms});
         }
     }
 

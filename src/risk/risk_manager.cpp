@@ -94,15 +94,27 @@ RiskStatus RiskManager::monitor(const PortfolioRiskSnapshot& snapshot) {
     auto breaches = current_limit_breaches(snapshot, settings_);
 
     std::lock_guard lock(mutex_);
-    if (!breaches.empty()) {
+    const bool daily_breach =
+        daily_loss_fraction >= settings_.daily_maximum_loss_fraction;
+    const bool drawdown_breach = drawdown_fraction >= settings_.maximum_drawdown_fraction;
+    if (!snapshot.utc_day.empty() && daily_breach && !drawdown_breach) {
+        // Daily loss: stop opening positions for the rest of this UTC day.
+        paused_day_ = snapshot.utc_day;
+    } else if (!breaches.empty()) {
         emergency_shutdown_ = true;
         shutdown_reasons_ = std::move(breaches);
+    }
+    const bool paused = !snapshot.utc_day.empty() && paused_day_ == snapshot.utc_day;
+    auto reasons = shutdown_reasons_;
+    if (paused && !emergency_shutdown_) {
+        reasons.push_back("Daily maximum loss reached; new entries paused until the next UTC day");
     }
     return {
         .emergency_shutdown = emergency_shutdown_,
         .daily_loss_fraction = daily_loss_fraction,
         .drawdown_fraction = drawdown_fraction,
-        .reasons = shutdown_reasons_
+        .reasons = std::move(reasons),
+        .daily_pause = paused
     };
 }
 
@@ -116,7 +128,7 @@ RiskDecision RiskManager::assess(const OrderIntent& order,
         .plan = std::nullopt,
         .reasons = status.reasons
     };
-    if (decision.emergency_shutdown) {
+    if (decision.emergency_shutdown || status.daily_pause) {
         return decision;
     }
 

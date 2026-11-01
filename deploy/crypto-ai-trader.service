@@ -1,0 +1,26 @@
+# systemd user service: keeps the bot running 24/7 and restarts it after a
+# crash or reboot. Install (see README "Run 24/7"):
+#   mkdir -p ~/.config/systemd/user ~/.config/crypto-ai-trader
+#   cp deploy/crypto-ai-trader.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now crypto-ai-trader
+#   loginctl enable-linger "$USER"   # keep running while logged out
+[Unit]
+Description=Crypto AI Trader (trend-following bot)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Edit these two lines if the repository lives elsewhere or to run paper mode
+# (--paper config/config.json).
+WorkingDirectory=%h/git/crypto-ai-trader-main
+ExecStart=%h/git/crypto-ai-trader-main/build-linux/crypto-ai-trader --live config/testnet.json
+# API keys and optional TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, one KEY=value per
+# line; keep this file private: chmod 600.
+EnvironmentFile=%h/.config/crypto-ai-trader/testnet.env
+Restart=always
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

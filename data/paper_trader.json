@@ -1,0 +1,14 @@
+{
+  "capital_allocation": 100.0,
+  "cash_balance": 100.0,
+  "daily_starting_equity": 100.0,
+  "executions": [],
+  "last_entry_candle_ms": {},
+  "next_client_sequence": 1,
+  "next_execution_id": 1,
+  "peak_equity": 100.0,
+  "positions": [],
+  "trading_halted": false,
+  "utc_day": "2026-11-01",
+  "version": 1
+}

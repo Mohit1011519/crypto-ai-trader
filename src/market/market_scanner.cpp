@@ -1,6 +1,9 @@
 #include "market/market_scanner.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <string>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -8,6 +11,24 @@
 #include <spdlog/spdlog.h>
 
 namespace crypto_trader::market {
+namespace {
+
+// Candle length for Binance interval strings such as "1m", "4h", "1d".
+std::int64_t interval_milliseconds(const std::string& interval) {
+    if (interval.size() < 2) {
+        return 0;
+    }
+    const auto count = std::stoll(interval.substr(0, interval.size() - 1));
+    switch (interval.back()) {
+    case 'm': return count * 60'000;
+    case 'h': return count * 3'600'000;
+    case 'd': return count * 86'400'000;
+    case 'w': return count * 604'800'000;
+    default: return 0;
+    }
+}
+
+}  // namespace
 
 MarketScanner::MarketScanner(const exchange::Exchange& exchange,
                              const common::AppConfig& config)
@@ -56,10 +77,21 @@ void MarketScanner::run(const std::atomic_bool& stop_requested,
         throw std::invalid_argument("Market scanner callback must be set");
     }
 
+    const auto candle_ms = interval_milliseconds(config_.candle_interval);
     while (!stop_requested.load()) {
         on_scan(scan_once());
-        const auto wait_until = std::chrono::steady_clock::now() +
-            std::chrono::seconds(config_.research.scan_interval_seconds);
+        // Wake at the regular interval, or a few seconds after the current
+        // candle closes if that is sooner, so new signals are acted on at once.
+        auto delay = std::chrono::milliseconds(
+            static_cast<std::int64_t>(config_.research.scan_interval_seconds) * 1000);
+        if (candle_ms > 0) {
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            const auto until_close = std::chrono::milliseconds(
+                (now_ms / candle_ms + 1) * candle_ms - now_ms + 3000);
+            delay = std::min(delay, until_close);
+        }
+        const auto wait_until = std::chrono::steady_clock::now() + delay;
         while (!stop_requested.load() && std::chrono::steady_clock::now() < wait_until) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }

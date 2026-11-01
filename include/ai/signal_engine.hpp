@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -38,6 +39,9 @@ struct TradingSignal {
     double estimated_round_trip_cost_percent;
     std::vector<SignalComponent> components;
     std::vector<std::string> reasons;
+    // The EMA trend has turned against long positions. Evaluated before the
+    // entry gates so that exits still fire in volatile or illiquid markets.
+    bool exit_long = false;
 };
 
 class SignalEngine {
@@ -49,7 +53,11 @@ public:
 private:
     common::SignalSettings settings_;
     std::mutex mutex_;
-    std::unordered_map<std::string, Signal> last_emitted_signal_;
+    struct EmittedSignal {
+        Signal action;
+        std::int64_t timestamp_ms;
+    };
+    std::unordered_map<std::string, EmittedSignal> last_emitted_signal_;
 };
 
 const char* to_string(Signal signal) noexcept;

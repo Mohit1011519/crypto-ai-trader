@@ -199,3 +199,45 @@ TEST(SignalEngine, UsesMaximumAllowedSpreadWhenOrderBookIsMissing) {
 }
 
 }  // namespace
+
+TEST(SignalEngine, BuyRequiresBullishTrendAndOptionalBreakout) {
+    crypto_trader::ai::SignalEngine sideways_engine(signal_settings());
+    auto sideways = bullish_research("SIDEWAYS");
+    sideways.trend->direction = crypto_trader::market::TrendDirection::sideways;
+    EXPECT_EQ(sideways_engine.evaluate(sideways).action, crypto_trader::ai::Signal::hold);
+
+    auto settings = signal_settings();
+    settings.require_breakout_for_buy = true;
+    crypto_trader::ai::SignalEngine breakout_engine(settings);
+    auto inside_range = bullish_research("RANGE");
+    EXPECT_EQ(breakout_engine.evaluate(inside_range).action, crypto_trader::ai::Signal::hold);
+    auto breakout = bullish_research("BREAKOUT");
+    breakout.trend->breakout_up = true;
+    EXPECT_EQ(breakout_engine.evaluate(breakout).action, crypto_trader::ai::Signal::buy);
+}
+
+TEST(SignalEngine, PerCandleSuppressionAllowsReentryOnANewCandle) {
+    auto settings = signal_settings();
+    settings.suppress_repeated_direction = false;
+    crypto_trader::ai::SignalEngine engine(settings);
+    auto research = bullish_research("REENTRY");
+    EXPECT_EQ(engine.evaluate(research).action, crypto_trader::ai::Signal::buy);
+    EXPECT_EQ(engine.evaluate(research).action, crypto_trader::ai::Signal::hold);
+
+    research.technical->metadata.timestamp_ms += 14'400'000;
+    EXPECT_EQ(engine.evaluate(research).action, crypto_trader::ai::Signal::buy);
+}
+
+TEST(SignalEngine, FlagsLongExitWhenFastEmaFallsBelowMediumEvenInHighVolatility) {
+    crypto_trader::ai::SignalEngine engine(signal_settings());
+    auto broken = bullish_research("BROKEN");
+    broken.technical->ema_fast = 99.0;
+    broken.technical->ema_medium = 100.5;
+    broken.volatility->risk = crypto_trader::market::VolatilityRisk::high;
+    const auto result = engine.evaluate(broken);
+    EXPECT_EQ(result.action, crypto_trader::ai::Signal::hold);
+    EXPECT_TRUE(result.exit_long);
+
+    crypto_trader::ai::SignalEngine healthy_engine(signal_settings());
+    EXPECT_FALSE(healthy_engine.evaluate(bullish_research("HEALTHY")).exit_long);
+}

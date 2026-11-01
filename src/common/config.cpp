@@ -107,6 +107,40 @@ AppConfig parse_config(const nlohmann::json& json) {
         .live_order_submission_enabled =
             json.at("live_order_submission_enabled").get<bool>()
     };
+    config.log_file = json.value("log_file", std::string{});
+    config.signals.require_bullish_trend_for_buy =
+        signals.value("require_bullish_trend_for_buy", true);
+    config.signals.suppress_repeated_direction =
+        signals.value("suppress_repeated_direction", true);
+    config.signals.require_breakout_for_buy =
+        signals.value("require_breakout_for_buy", false);
+    config.risk.trailing_stop_atr_multiple =
+        risk.value("trailing_stop_atr_multiple", 0.0);
+    config.risk.breakeven_trigger_r = risk.value("breakeven_trigger_r", 0.0);
+    if (json.contains("live")) {
+        const auto& live = json.at("live");
+        config.live.order_base_url = live.value("order_base_url", config.live.order_base_url);
+        config.live.state_path = live.value("state_path", config.live.state_path.string());
+        config.live.quote_asset = live.value("quote_asset", config.live.quote_asset);
+        config.live.capital_allocation =
+            live.value("capital_allocation", config.live.capital_allocation);
+        config.live.maximum_order_notional =
+            live.value("maximum_order_notional", config.live.maximum_order_notional);
+        config.live.stop_update_minimum_fraction = live.value(
+            "stop_update_minimum_fraction", config.live.stop_update_minimum_fraction);
+        config.live.flatten_on_risk_shutdown =
+            live.value("flatten_on_risk_shutdown", config.live.flatten_on_risk_shutdown);
+        config.live.receive_window_ms =
+            live.value("receive_window_ms", config.live.receive_window_ms);
+    }
+    if (json.contains("backtest")) {
+        const auto& backtest = json.at("backtest");
+        config.backtest.candle_count = backtest.value("candle_count", 1000);
+        if (backtest.contains("spread_fraction")) {
+            config.backtest.spread_fraction =
+                backtest.at("spread_fraction").get<double>();
+        }
+    }
 
     require_non_empty(config.exchange, "exchange");
     require_non_empty(config.mode, "mode");
@@ -120,8 +154,9 @@ AppConfig parse_config(const nlohmann::json& json) {
     if (config.exchange != "binance") {
         throw std::invalid_argument("Only the 'binance' exchange is supported in Phase 1");
     }
-    if (config.mode != "paper") {
-        throw std::invalid_argument("Phase 1 supports only paper mode; live trading is not implemented");
+    if (config.mode != "paper" && config.mode != "testnet") {
+        throw std::invalid_argument(
+            "mode must be 'paper' or 'testnet'; mainnet live trading is not enabled");
     }
     if (config.trading_pairs.empty()) {
         throw std::invalid_argument("Configuration field 'trading_pairs' must contain at least one pair");
@@ -278,14 +313,56 @@ AppConfig parse_config(const nlohmann::json& json) {
         !std::isfinite(risk_settings.slippage_rate)) {
         throw std::invalid_argument("Risk settings must be finite numbers");
     }
+    if (!std::isfinite(risk_settings.trailing_stop_atr_multiple) ||
+        risk_settings.trailing_stop_atr_multiple < 0.0 ||
+        !std::isfinite(risk_settings.breakeven_trigger_r) ||
+        risk_settings.breakeven_trigger_r < 0.0) {
+        throw std::invalid_argument("Trailing-stop and break-even settings must be finite and non-negative");
+    }
+    if (config.backtest.candle_count < 3 || config.backtest.candle_count > 100000 ||
+        (config.backtest.spread_fraction &&
+         (!std::isfinite(*config.backtest.spread_fraction) ||
+          *config.backtest.spread_fraction < 0.0 ||
+          *config.backtest.spread_fraction >= 1.0))) {
+        throw std::invalid_argument("Backtest candle_count or spread_fraction is invalid");
+    }
     if (!std::isfinite(config.paper_initial_balance) ||
         config.paper_initial_balance <= 0.0 ||
         config.paper_state_path.empty()) {
         throw std::invalid_argument("Paper portfolio settings require a positive initial balance and state path");
     }
-    if (config.live_order_submission_enabled) {
+    if (config.mode == "paper" && config.live_order_submission_enabled) {
         throw std::invalid_argument(
-            "Live order submission is unavailable; live_order_submission_enabled must remain false");
+            "live_order_submission_enabled requires mode 'testnet'; it must be false in paper mode");
+    }
+    if (config.mode == "testnet" && !config.live_order_submission_enabled) {
+        throw std::invalid_argument(
+            "mode 'testnet' requires live_order_submission_enabled: true");
+    }
+    const auto& live = config.live;
+    if (live.order_base_url != "https://testnet.binance.vision") {
+        throw std::invalid_argument(
+            "live.order_base_url must be https://testnet.binance.vision; mainnet orders are not enabled");
+    }
+    if (live.state_path.empty() || live.quote_asset.empty() ||
+        !valid_symbol(live.quote_asset) ||
+        !std::isfinite(live.capital_allocation) || live.capital_allocation <= 0.0 ||
+        !std::isfinite(live.maximum_order_notional) || live.maximum_order_notional <= 0.0 ||
+        live.maximum_order_notional > live.capital_allocation ||
+        !std::isfinite(live.stop_update_minimum_fraction) ||
+        live.stop_update_minimum_fraction < 0.0 || live.stop_update_minimum_fraction >= 0.1 ||
+        live.receive_window_ms < 1 || live.receive_window_ms > 60000) {
+        throw std::invalid_argument("Live execution settings are invalid");
+    }
+    if (config.mode == "testnet") {
+        for (const auto& pair : config.trading_pairs) {
+            if (pair.size() <= live.quote_asset.size() ||
+                pair.compare(pair.size() - live.quote_asset.size(),
+                             live.quote_asset.size(), live.quote_asset) != 0) {
+                throw std::invalid_argument(
+                    "Every trading pair must be quoted in live.quote_asset: " + pair);
+            }
+        }
     }
 
     return config;

@@ -1,0 +1,11 @@
+{
+  "balances": {
+    "USDT": {
+      "free": 100.0,
+      "locked": 0.0
+    }
+  },
+  "next_order_id": 1,
+  "orders": [],
+  "version": 1
+}
