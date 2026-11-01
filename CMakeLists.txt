@@ -50,7 +50,7 @@ target_link_libraries(crypto_trader
 )
 
 if(MSVC)
-    target_compile_options(crypto_trader PRIVATE /W4 /permissive-)
+    target_compile_options(crypto_trader PRIVATE /W4 /permissive- /bigobj)
 else()
     target_compile_options(crypto_trader PRIVATE -Wall -Wextra -Wpedantic)
 endif()

@@ -66,12 +66,13 @@ If `VCPKG_ROOT` is not set, replace it with the path where you installed vcpkg.
 
 ## Build and test (PowerShell)
 
-From the `crypto-ai-trader` directory:
+On Windows, with `VCPKG_ROOT` set to the vcpkg installation directory, run
+these commands from the `crypto-ai-trader` directory:
 
 ```powershell
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+cmake --preset windows-vcpkg
+cmake --build --preset windows-release
+ctest --preset windows-release
 ```
 
 ## Usage
@@ -87,6 +88,9 @@ provided as the final argument.
 Symbols passed on the command line must also be listed in `trading_pairs`.
 `--stream` reconnects after network failures using the configured delay. Press
 Ctrl+C to request shutdown. REST and TLS certificate verification are enabled.
+WebSocket DNS, TCP, TLS, handshake, and read operations are bounded by
+`request_timeout_seconds`; outbound access to `stream.binance.com:9443` is
+required for live prices.
 
 ## Configuration and safety
 
