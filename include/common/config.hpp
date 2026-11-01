@@ -52,6 +52,18 @@ struct SignalSettings {
     double maximum_spread_percent;
 };
 
+struct RiskSettings {
+    double risk_per_trade_fraction;
+    int maximum_open_positions;
+    double daily_maximum_loss_fraction;
+    double maximum_drawdown_fraction;
+    double maximum_gross_exposure_fraction;
+    double stop_atr_multiple;
+    double target_atr_multiple;
+    double taker_fee_rate;
+    double slippage_rate;
+};
+
 struct AppConfig {
     std::string exchange;
     std::string mode;
@@ -67,6 +79,9 @@ struct AppConfig {
     std::string log_level;
     ResearchSettings research;
     SignalSettings signals;
+    RiskSettings risk;
+    double paper_initial_balance;
+    std::filesystem::path paper_state_path;
 };
 
 AppConfig parse_config(const nlohmann::json& json);

@@ -3,6 +3,8 @@
 #include "exchange/binance_exchange.hpp"
 #include "exchange/binance_market_stream.hpp"
 #include "market/market_scanner.hpp"
+#include "paper/paper_portfolio.hpp"
+#include "risk/risk_manager.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +33,10 @@ void print_usage() {
               << "  crypto-ai-trader --stream SYMBOL [config-path]\n"
               << "  crypto-ai-trader --scan-once [config-path]\n"
               << "  crypto-ai-trader --scan [config-path]\n"
+              << "  crypto-ai-trader --paper-once [config-path]\n"
+              << "  crypto-ai-trader --paper [config-path]\n"
+              << "  crypto-ai-trader --paper-status [config-path]\n"
+              << "  crypto-ai-trader --paper-reset [config-path]\n"
               << "  crypto-ai-trader --help\n";
 }
 
@@ -74,7 +80,8 @@ void print_optional(const std::optional<double>& value, const int precision = 2)
     }
 }
 
-void print_scan(const std::vector<crypto_trader::market::ScanResult>& results) {
+void print_scan(const std::vector<crypto_trader::market::ScanResult>& results,
+                const bool paper_mode = false) {
     std::cout << "\nMarket Scan (public data; research and advisory signals only)\n";
     for (const auto& result : results) {
         std::cout << result.symbol << ": ";
@@ -178,7 +185,11 @@ void print_scan(const std::vector<crypto_trader::market::ScanResult>& results) {
         }
         std::cout << '\n';
     }
-    std::cout << "Signals are advisory only; positions are not tracked and no orders are placed.\n";
+    if (paper_mode) {
+        std::cout << "Paper simulation only; fills are estimates and no exchange orders are sent.\n";
+    } else {
+        std::cout << "Signals are advisory only; positions are not tracked and no orders are placed.\n";
+    }
 }
 
 void require_configured_symbol(const crypto_trader::common::AppConfig& config,
@@ -241,6 +252,87 @@ int scan_markets(const crypto_trader::common::AppConfig& config, const bool repe
     return 0;
 }
 
+void print_paper_account(
+    const crypto_trader::paper::PaperPortfolioView& account,
+    const std::vector<crypto_trader::paper::PaperExecution>& executions) {
+    std::cout << "\nPaper Account"
+              << " Cash=" << std::fixed << std::setprecision(2) << account.cash_balance
+              << " Equity=" << account.equity
+              << " GrossExposure=" << account.gross_exposure
+              << " UnrealizedPnL=" << account.unrealized_pnl
+              << " DailyPnL=" << account.daily_net_pnl
+              << " PeakEquity=" << account.peak_equity
+              << " Trading=" << (account.trading_halted ? "HALTED" : "ENABLED")
+              << '\n';
+    for (const auto& position : account.positions) {
+        std::cout << "  " << position.symbol
+                  << " Qty=" << std::setprecision(8) << position.quantity
+                  << " Entry=" << std::setprecision(4) << position.entry_price
+                  << " Mark=" << position.mark_price
+                  << " Stop=" << position.stop_loss_price
+                  << " Target=" << position.take_profit_price << '\n';
+    }
+    for (const auto& execution : executions) {
+        std::cout << "  Simulated " << execution.side << ' ' << execution.symbol
+                  << " Qty=" << std::setprecision(8) << execution.quantity
+                  << " Price=" << std::setprecision(4) << execution.price
+                  << " Fee=" << execution.fee
+                  << " RealizedPnL=" << execution.realized_pnl
+                  << " Reason=[" << execution.reason << "]\n";
+    }
+}
+
+int run_paper(const crypto_trader::common::AppConfig& config,
+              const std::string& command) {
+    crypto_trader::paper::PaperPortfolio portfolio(
+        config.paper_state_path,
+        config.paper_initial_balance,
+        config.risk,
+        config.signals.maximum_spread_percent);
+
+    if (command == "--paper-status") {
+        print_paper_account(portfolio.view(), {});
+        std::cout << "Execution history: " << portfolio.execution_history().size()
+                  << " records. State: " << config.paper_state_path.string() << '\n';
+        return 0;
+    }
+
+    crypto_trader::risk::RiskManager risk_manager(config.risk);
+    crypto_trader::exchange::BinanceExchange exchange(config);
+    crypto_trader::market::MarketScanner scanner(exchange, config);
+    if (command == "--paper-reset") {
+        const auto results = scanner.scan_once();
+        print_scan(results, true);
+        auto mark_only_results = results;
+        for (auto& result : mark_only_results) {
+            if (result.signal) {
+                result.signal->action = crypto_trader::ai::Signal::hold;
+            }
+        }
+        portfolio.process_scan(mark_only_results, risk_manager);
+        portfolio.reset_risk_shutdown(risk_manager);
+        print_paper_account(portfolio.view(), {});
+        return 0;
+    }
+
+    const auto on_scan = [&](const std::vector<crypto_trader::market::ScanResult>& results) {
+        print_scan(results, true);
+        const auto executions = portfolio.process_scan(results, risk_manager);
+        print_paper_account(portfolio.view(), executions);
+    };
+    if (command == "--paper") {
+        std::signal(SIGINT, handle_signal);
+        std::signal(SIGTERM, handle_signal);
+        spdlog::info("Paper simulation scanning {} configured markets every {} seconds. "
+                     "Press Ctrl+C to stop.",
+                     config.trading_pairs.size(), config.research.scan_interval_seconds);
+        scanner.run(stop_requested, on_scan);
+        return 0;
+    }
+    on_scan(scanner.scan_once());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -255,7 +347,9 @@ int main(int argc, char* argv[]) {
 
     try {
         const std::string command = argv[1];
-        const bool scanner_command = command == "--scan" || command == "--scan-once";
+        const bool scanner_command = command == "--scan" || command == "--scan-once" ||
+            command == "--paper" || command == "--paper-once" ||
+            command == "--paper-status" || command == "--paper-reset";
         if (scanner_command && (argc < 2 || argc > 3)) {
             print_usage();
             return 2;
@@ -272,6 +366,10 @@ int main(int argc, char* argv[]) {
 
         if (command == "--scan-once" || command == "--scan") {
             return scan_markets(config, command == "--scan");
+        }
+        if (command == "--paper-once" || command == "--paper" ||
+            command == "--paper-status" || command == "--paper-reset") {
+            return run_paper(config, command);
         }
 
         const std::string symbol = argv[2];

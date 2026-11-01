@@ -1,9 +1,10 @@
 # Crypto AI Trader
 
-Modular C++20 cryptocurrency market-data and research foundation. Completed
-Phases 1 through 3 provide public Binance market-data access, transparent
-research, and advisory BUY/SELL/HOLD signals. The application does not
-authenticate, track positions, or place orders.
+Modular C++20 cryptocurrency market-data, research, signal, risk-analysis, and
+paper-portfolio foundation. Phases 1 through 5 provide public Binance market
+data, advisory BUY/SELL/HOLD signals, risk sizing, and locally simulated
+positions with a persistent execution ledger. The application does not
+authenticate or place exchange orders.
 
 ## Architecture
 
@@ -20,6 +21,10 @@ config/config.json
                                        |      +--> volume / volatility
                                        |      +--> order-book research
                                        +--> SignalEngine --> research report
+                                                    |
+                                                    +--> RiskManager (explicit account snapshot)
+                                                               |
+                                                               +--> PaperPortfolio --> local state/ledger
 ```
 
 `Exchange` is an abstraction for public market-data calls. The scanner uses it
@@ -43,10 +48,14 @@ inventing data.
    independent confirmation count, quality/coverage/regime gates, and
    fee/slippage/spread-adjusted reward/risk checks. Repeated same-direction
    signals are suppressed for the lifetime of the scanner.
-4. **Risk — not implemented:** independent limits, position sizing, and
-   protective exits.
-5. **Paper portfolio — not implemented:** persistence, ledger, and simulated
-   execution.
+4. **Risk — implemented:** independent snapshot monitoring, latched daily-loss
+   and account-drawdown shutdowns, buy-only spot sizing, maximum position and
+   gross-exposure limits, ATR protective exits, and fee/slippage/spread-adjusted
+   risk estimates. The planner is not connected to execution.
+5. **Paper portfolio — implemented:** local JSON persistence, cash/equity and
+   position ledger, risk-approved simulated spot buys, simulated sell/stop/
+   target exits, and fee/slippage-aware paper fills. It is not connected to
+   exchange order endpoints.
 6. **Backtesting — not implemented.**
 7. **Machine learning — not implemented.**
 8. **Live trading — not implemented.**
@@ -98,6 +107,10 @@ config path as shown:
 .\build\Release\crypto-ai-trader.exe --stream BTCUSDT [config-path]
 .\build\Release\crypto-ai-trader.exe --scan-once [config-path]
 .\build\Release\crypto-ai-trader.exe --scan [config-path]
+.\build\Release\crypto-ai-trader.exe --paper-once [config-path]
+.\build\Release\crypto-ai-trader.exe --paper [config-path]
+.\build\Release\crypto-ai-trader.exe --paper-status [config-path]
+.\build\Release\crypto-ai-trader.exe --paper-reset [config-path]
 ```
 
 `--scan-once` researches every configured pair once. `--scan` repeats at the
@@ -106,6 +119,18 @@ failures are logged and reported without preventing the remaining pairs from
 being scanned. Scan output includes the signal action, signed research score,
 confidence, available-weight coverage, confirmations, estimated net reward/risk,
 estimated round-trip costs, component scores, and the decision's explanations.
+`--paper-once` processes one public-data scan through the risk manager and
+paper ledger; `--paper` repeats at the configured interval. BUY signals can
+open simulated spot positions when risk checks approve. SELL signals close
+existing paper positions, while stop/target exits are evaluated using candle
+close values. These are simplified paper fills—not realistic queue, liquidity,
+or intrabar execution models. Positions, cash, risk shutdown state, and
+simulated execution records persist at `paper_state_path`; an existing state
+file takes precedence over a later change to `paper_initial_balance`.
+`--paper-status` displays the last persisted account marks. `--paper-reset`
+fetches fresh market data, updates marks and applicable exits, and then resets
+the latched risk shutdown only if configured limits are safe. The path is local
+application state and should be backed up before manual edits.
 
 REST and WebSocket TLS certificate verification are enabled. REST requests use
 the configured timeout; WebSocket DNS, TCP, TLS, handshake, and read operations
@@ -120,5 +145,17 @@ periods and thresholds. Signal settings define weights, thresholds, required
 confirmations, ATR-based expected reward/risk multiples, taker fees, slippage,
 and maximum acceptable spread. Sentiment currently has zero weight because no
 sentiment provider is implemented. Order-book depth must use a supported
-Binance depth limit. Invalid or inconsistent settings are rejected. No API
-credentials are used or stored, and this phase cannot place orders.
+Binance depth limit. `paper_initial_balance` seeds a new paper account only;
+`paper_state_path` selects its persistent state and execution ledger. Risk
+settings define per-trade equity risk (default 0.5%),
+maximum open positions (3), daily loss (2%), peak-equity drawdown (10%), gross
+exposure (100% of equity), ATR exit multiples, fees, and slippage. Risk
+monitoring requires the caller to supply current equity, available balance,
+exposure, open positions, daily starting equity/net P&L, and peak equity; the
+risk manager latches shutdown when daily loss or drawdown reaches its limit and
+requires an explicit safe reset. Sell/short orders are rejected; position
+closing is not implemented. The paper ledger maintains those account values locally, but does not reconcile
+exchange balances or external transactions. Invalid or inconsistent settings
+and corrupted ledger files are rejected instead of silently reset. No API
+credentials are used or stored, and the application cannot place exchange
+orders.

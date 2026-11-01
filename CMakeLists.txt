@@ -40,6 +40,8 @@ add_library(crypto_trader
     src/market/trend_analysis.cpp
     src/market/volatility_analysis.cpp
     src/market/volume_analysis.cpp
+    src/paper/paper_portfolio.cpp
+    src/risk/risk_manager.cpp
 )
 
 target_include_directories(crypto_trader PUBLIC include)
@@ -77,6 +79,8 @@ if(BUILD_TESTING)
     add_executable(crypto_trader_tests
         tests/config_tests.cpp
         tests/market_research_tests.cpp
+        tests/paper_portfolio_tests.cpp
+        tests/risk_manager_tests.cpp
         tests/signal_engine_tests.cpp
     )
     target_link_libraries(crypto_trader_tests PRIVATE crypto_trader GTest::gtest_main)

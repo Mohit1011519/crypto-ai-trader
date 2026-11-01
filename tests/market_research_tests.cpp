@@ -214,7 +214,20 @@ crypto_trader::common::AppConfig scanner_config() {
             .taker_fee_rate = 0.001,
             .slippage_rate = 0.0005,
             .maximum_spread_percent = 0.005
-        }
+        },
+        .risk = {
+            .risk_per_trade_fraction = 0.005,
+            .maximum_open_positions = 3,
+            .daily_maximum_loss_fraction = 0.02,
+            .maximum_drawdown_fraction = 0.10,
+            .maximum_gross_exposure_fraction = 1.0,
+            .stop_atr_multiple = 1.5,
+            .target_atr_multiple = 3.0,
+            .taker_fee_rate = 0.001,
+            .slippage_rate = 0.0005
+        },
+        .paper_initial_balance = 10000.0,
+        .paper_state_path = "test-paper-state.json"
     };
 }
 

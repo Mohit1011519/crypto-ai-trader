@@ -35,6 +35,7 @@ AppConfig parse_config(const nlohmann::json& json) {
     const auto& research = json.at("research");
     const auto& signals = json.at("signals");
     const auto& weights = signals.at("weights");
+    const auto& risk = json.at("risk");
     AppConfig config{
         .exchange = json.at("exchange").get<std::string>(),
         .mode = json.at("mode").get<std::string>(),
@@ -89,7 +90,20 @@ AppConfig parse_config(const nlohmann::json& json) {
             .taker_fee_rate = signals.at("taker_fee_rate").get<double>(),
             .slippage_rate = signals.at("slippage_rate").get<double>(),
             .maximum_spread_percent = signals.at("maximum_spread_percent").get<double>()
-        }
+        },
+        .risk = RiskSettings{
+            .risk_per_trade_fraction = risk.at("risk_per_trade_fraction").get<double>(),
+            .maximum_open_positions = risk.at("maximum_open_positions").get<int>(),
+            .daily_maximum_loss_fraction = risk.at("daily_maximum_loss_fraction").get<double>(),
+            .maximum_drawdown_fraction = risk.at("maximum_drawdown_fraction").get<double>(),
+            .maximum_gross_exposure_fraction = risk.at("maximum_gross_exposure_fraction").get<double>(),
+            .stop_atr_multiple = risk.at("stop_atr_multiple").get<double>(),
+            .target_atr_multiple = risk.at("target_atr_multiple").get<double>(),
+            .taker_fee_rate = risk.at("taker_fee_rate").get<double>(),
+            .slippage_rate = risk.at("slippage_rate").get<double>()
+        },
+        .paper_initial_balance = json.at("paper_initial_balance").get<double>(),
+        .paper_state_path = json.at("paper_state_path").get<std::string>()
     };
 
     require_non_empty(config.exchange, "exchange");
@@ -234,6 +248,38 @@ AppConfig parse_config(const nlohmann::json& json) {
         !std::isfinite(signal_settings.slippage_rate) ||
         !std::isfinite(signal_settings.maximum_spread_percent)) {
         throw std::invalid_argument("Signal settings must be finite numbers");
+    }
+
+    const auto& risk_settings = config.risk;
+    if (risk_settings.risk_per_trade_fraction <= 0.0 ||
+        risk_settings.risk_per_trade_fraction > 0.05 ||
+        risk_settings.maximum_open_positions < 1 ||
+        risk_settings.daily_maximum_loss_fraction <= 0.0 ||
+        risk_settings.daily_maximum_loss_fraction > 0.25 ||
+        risk_settings.maximum_drawdown_fraction <= 0.0 ||
+        risk_settings.maximum_drawdown_fraction > 0.5 ||
+        risk_settings.maximum_gross_exposure_fraction <= 0.0 ||
+        risk_settings.maximum_gross_exposure_fraction > 1.0 ||
+        risk_settings.stop_atr_multiple <= 0.0 ||
+        risk_settings.target_atr_multiple <= 0.0 ||
+        risk_settings.taker_fee_rate < 0.0 || risk_settings.taker_fee_rate >= 1.0 ||
+        risk_settings.slippage_rate < 0.0 || risk_settings.slippage_rate >= 1.0) {
+        throw std::invalid_argument("Risk settings contain invalid limits or costs");
+    }
+    if (!std::isfinite(risk_settings.risk_per_trade_fraction) ||
+        !std::isfinite(risk_settings.daily_maximum_loss_fraction) ||
+        !std::isfinite(risk_settings.maximum_drawdown_fraction) ||
+        !std::isfinite(risk_settings.maximum_gross_exposure_fraction) ||
+        !std::isfinite(risk_settings.stop_atr_multiple) ||
+        !std::isfinite(risk_settings.target_atr_multiple) ||
+        !std::isfinite(risk_settings.taker_fee_rate) ||
+        !std::isfinite(risk_settings.slippage_rate)) {
+        throw std::invalid_argument("Risk settings must be finite numbers");
+    }
+    if (!std::isfinite(config.paper_initial_balance) ||
+        config.paper_initial_balance <= 0.0 ||
+        config.paper_state_path.empty()) {
+        throw std::invalid_argument("Paper portfolio settings require a positive initial balance and state path");
     }
 
     return config;

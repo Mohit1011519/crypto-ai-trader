@@ -11,6 +11,8 @@ nlohmann::json valid_config() {
     return {
         {"exchange", "binance"},
         {"mode", "paper"},
+        {"paper_initial_balance", 10000.0},
+        {"paper_state_path", "data/paper_portfolio.json"},
         {"rest_base_url", "https://api.binance.com"},
         {"websocket_host", "stream.binance.com"},
         {"websocket_port", "9443"},
@@ -64,6 +66,17 @@ nlohmann::json valid_config() {
             {"taker_fee_rate", 0.001},
             {"slippage_rate", 0.0005},
             {"maximum_spread_percent", 0.005}
+        }},
+        {"risk", {
+            {"risk_per_trade_fraction", 0.005},
+            {"maximum_open_positions", 3},
+            {"daily_maximum_loss_fraction", 0.02},
+            {"maximum_drawdown_fraction", 0.10},
+            {"maximum_gross_exposure_fraction", 1.0},
+            {"stop_atr_multiple", 1.5},
+            {"target_atr_multiple", 3.0},
+            {"taker_fee_rate", 0.001},
+            {"slippage_rate", 0.0005}
         }}
     };
 }
@@ -79,6 +92,9 @@ TEST(ConfigTests, ParsesValidPaperConfiguration) {
     EXPECT_EQ(config.candle_limit, 500);
     EXPECT_DOUBLE_EQ(config.signals.momentum_weight, 0.30);
     EXPECT_DOUBLE_EQ(config.signals.minimum_reward_risk_ratio, 1.50);
+    EXPECT_DOUBLE_EQ(config.risk.risk_per_trade_fraction, 0.005);
+    EXPECT_EQ(config.risk.maximum_open_positions, 3);
+    EXPECT_DOUBLE_EQ(config.paper_initial_balance, 10000.0);
 }
 
 TEST(ConfigTests, RejectsLiveModeInPhaseOne) {
@@ -131,4 +147,24 @@ TEST(ConfigTests, RejectsSignalCostsOutsideValidRange) {
     json["signals"]["taker_fee_rate"] = 1.0;
 
     EXPECT_THROW(crypto_trader::common::parse_config(json), std::invalid_argument);
+}
+
+TEST(ConfigTests, RejectsRiskLimitsOutsideSafeRange) {
+    auto excessive_trade_risk = valid_config();
+    excessive_trade_risk["risk"]["risk_per_trade_fraction"] = 0.1;
+    EXPECT_THROW(crypto_trader::common::parse_config(excessive_trade_risk), std::invalid_argument);
+
+    auto leveraged_exposure = valid_config();
+    leveraged_exposure["risk"]["maximum_gross_exposure_fraction"] = 1.5;
+    EXPECT_THROW(crypto_trader::common::parse_config(leveraged_exposure), std::invalid_argument);
+}
+
+TEST(ConfigTests, RejectsInvalidPaperPortfolioSettings) {
+    auto invalid_balance = valid_config();
+    invalid_balance["paper_initial_balance"] = 0.0;
+    EXPECT_THROW(crypto_trader::common::parse_config(invalid_balance), std::invalid_argument);
+
+    auto missing_state_path = valid_config();
+    missing_state_path["paper_state_path"] = "";
+    EXPECT_THROW(crypto_trader::common::parse_config(missing_state_path), std::invalid_argument);
 }
