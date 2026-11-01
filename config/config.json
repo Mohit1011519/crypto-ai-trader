@@ -1,0 +1,20 @@
+{
+  "exchange": "binance",
+  "mode": "paper",
+  "rest_base_url": "https://api.binance.com",
+  "websocket_host": "stream.binance.com",
+  "websocket_port": "9443",
+  "websocket_path": "/ws",
+  "trading_pairs": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT"
+  ],
+  "candle_interval": "1m",
+  "candle_limit": 500,
+  "request_timeout_seconds": 15,
+  "reconnect_delay_seconds": 5,
+  "log_level": "info"
+}

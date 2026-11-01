@@ -1,0 +1,11 @@
+{
+  "name": "crypto-ai-trader",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "boost-asio[ssl]",
+    "boost-beast",
+    "boost-system",
+    "curl",
+    "openssl"
+  ]
+}
