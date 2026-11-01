@@ -29,10 +29,17 @@ set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json spdlog)
 
 add_library(crypto_trader
+    src/ai/signal_engine.cpp
     src/common/config.cpp
     src/common/logger.cpp
     src/exchange/binance_exchange.cpp
     src/exchange/binance_market_stream.cpp
+    src/indicators/technical_indicators.cpp
+    src/market/market_scanner.cpp
+    src/market/order_book_analysis.cpp
+    src/market/trend_analysis.cpp
+    src/market/volatility_analysis.cpp
+    src/market/volume_analysis.cpp
 )
 
 target_include_directories(crypto_trader PUBLIC include)
@@ -67,7 +74,11 @@ if(BUILD_TESTING)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
-    add_executable(crypto_trader_tests tests/config_tests.cpp)
+    add_executable(crypto_trader_tests
+        tests/config_tests.cpp
+        tests/market_research_tests.cpp
+        tests/signal_engine_tests.cpp
+    )
     target_link_libraries(crypto_trader_tests PRIVATE crypto_trader GTest::gtest_main)
     include(GoogleTest)
     gtest_discover_tests(crypto_trader_tests)

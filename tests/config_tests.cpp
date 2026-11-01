@@ -20,7 +20,51 @@ nlohmann::json valid_config() {
         {"candle_limit", 500},
         {"request_timeout_seconds", 15},
         {"reconnect_delay_seconds", 5},
-        {"log_level", "info"}
+        {"log_level", "info"},
+        {"research", {
+            {"ema_fast_period", 20},
+            {"ema_medium_period", 50},
+            {"ema_slow_period", 200},
+            {"rsi_period", 14},
+            {"macd_fast_period", 12},
+            {"macd_slow_period", 26},
+            {"macd_signal_period", 9},
+            {"bollinger_period", 20},
+            {"bollinger_standard_deviations", 2.0},
+            {"atr_period", 14},
+            {"stochastic_rsi_period", 14},
+            {"volume_average_period", 20},
+            {"volume_spike_multiple", 2.0},
+            {"support_resistance_period", 50},
+            {"historical_volatility_period", 30},
+            {"normal_volatility_threshold", 0.01},
+            {"high_volatility_threshold", 0.03},
+            {"sudden_volatility_multiple", 2.5},
+            {"order_book_depth", 20},
+            {"large_order_multiple", 3.0},
+            {"minimum_quote_liquidity", 10000.0},
+            {"scan_interval_seconds", 60}
+        }},
+        {"signals", {
+            {"weights", {
+                {"trend", 0.25},
+                {"momentum", 0.30},
+                {"volume", 0.15},
+                {"volatility", 0.10},
+                {"order_book", 0.20},
+                {"sentiment", 0.0}
+            }},
+            {"minimum_signal_score", 0.35},
+            {"minimum_research_quality", 0.80},
+            {"minimum_research_coverage", 0.65},
+            {"minimum_confirmations", 2},
+            {"minimum_reward_risk_ratio", 1.50},
+            {"target_atr_multiple", 3.0},
+            {"stop_atr_multiple", 1.5},
+            {"taker_fee_rate", 0.001},
+            {"slippage_rate", 0.0005},
+            {"maximum_spread_percent", 0.005}
+        }}
     };
 }
 
@@ -33,6 +77,8 @@ TEST(ConfigTests, ParsesValidPaperConfiguration) {
     EXPECT_EQ(config.mode, "paper");
     EXPECT_EQ(config.trading_pairs.size(), 2);
     EXPECT_EQ(config.candle_limit, 500);
+    EXPECT_DOUBLE_EQ(config.signals.momentum_weight, 0.30);
+    EXPECT_DOUBLE_EQ(config.signals.minimum_reward_risk_ratio, 1.50);
 }
 
 TEST(ConfigTests, RejectsLiveModeInPhaseOne) {
@@ -57,4 +103,32 @@ TEST(ConfigTests, RejectsMalformedOrDuplicatePairs) {
     auto duplicate = valid_config();
     duplicate["trading_pairs"] = {"BTCUSDT", "BTCUSDT"};
     EXPECT_THROW(crypto_trader::common::parse_config(duplicate), std::invalid_argument);
+}
+
+TEST(ConfigTests, RejectsInconsistentResearchPeriods) {
+    auto json = valid_config();
+    json["research"]["ema_slow_period"] = 20;
+
+    EXPECT_THROW(crypto_trader::common::parse_config(json), std::invalid_argument);
+}
+
+TEST(ConfigTests, RejectsUnsupportedOrderBookDepth) {
+    auto json = valid_config();
+    json["research"]["order_book_depth"] = 17;
+
+    EXPECT_THROW(crypto_trader::common::parse_config(json), std::invalid_argument);
+}
+
+TEST(ConfigTests, RejectsSignalWeightsThatDoNotSumToOne) {
+    auto json = valid_config();
+    json["signals"]["weights"]["trend"] = 0.5;
+
+    EXPECT_THROW(crypto_trader::common::parse_config(json), std::invalid_argument);
+}
+
+TEST(ConfigTests, RejectsSignalCostsOutsideValidRange) {
+    auto json = valid_config();
+    json["signals"]["taker_fee_rate"] = 1.0;
+
+    EXPECT_THROW(crypto_trader::common::parse_config(json), std::invalid_argument);
 }

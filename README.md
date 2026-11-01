@@ -1,73 +1,83 @@
-<<<<<<< HEAD
 # Crypto AI Trader
 
-Phase 1 foundation for a modular C++20 cryptocurrency market-data application.
-The current executable only consumes Binance public market data. It does not
-authenticate, submit orders, or make trading recommendations.
+Modular C++20 cryptocurrency market-data and research foundation. Completed
+Phases 1 through 3 provide public Binance market-data access, transparent
+research, and advisory BUY/SELL/HOLD signals. The application does not
+authenticate, track positions, or place orders.
 
-## Architecture and implementation plan
+## Architecture
 
 ```text
 config/config.json
         |
-        v
-common::load_config() ----> common::initialize_logging()
+        +--> common::load_config() --> validated settings
         |
-        +----> BinanceExchange ----> Binance REST /api/v3/klines
-        |
-        +----> BinanceMarketStream ----> Binance TLS WebSocket trade stream
+        +--> BinanceExchange --> public REST candles and order book
+        |                              |
+        +--> BinanceMarketStream       +--> MarketScanner
+                    |                  |      +--> technical indicators
+                    +--> trade prices  |      +--> trend / support / resistance
+                                       |      +--> volume / volatility
+                                       |      +--> order-book research
+                                       +--> SignalEngine --> research report
 ```
 
-The `Exchange` interface isolates exchange-specific historical data access.
-`BinanceExchange` handles REST and returns typed candle records.
-`BinanceMarketStream` owns TLS, WebSocket parsing, and reconnect behavior, and
-delivers typed price updates through a callback. Configuration is validated
-before either network client starts. All API access in this phase is public,
-read-only market data.
+`Exchange` is an abstraction for public market-data calls. The scanner uses it
+to fetch each configured market's OHLCV candles and order book, then sends those
+inputs to deterministic, independently testable research functions. Research
+values carry input sample counts, timestamps, and a sample-sufficiency quality
+score. Indicator warm-up values are reported as unavailable instead of
+inventing data.
 
-Planned phases:
+## Phase status
 
-1. **Connectivity foundation (current):** CMake, configuration, logging,
-   Binance public REST candles, live trade-price stream, and configuration tests.
-2. **Market research:** scanner, indicators, trend, volume, volatility, and
-   order-book analysis.
-3. **Signals:** transparent rule-based research aggregation and BUY/SELL/HOLD
-   decisions.
-4. **Risk:** independent limits, sizing, stops, and take-profit calculations.
-5. **Paper portfolio:** persistence, ledger, and simulated execution.
-6. **Backtesting:** chronological simulation and performance metrics.
-7. **ML:** feature pipeline, ONNX inference, and out-of-sample evaluation.
-8. **Optional live execution:** only after independent safeguards and explicit
-   user configuration are designed and tested. It is not present in this phase.
+1. **Connectivity foundation — implemented:** CMake, validated configuration,
+   logging, Binance REST candles, TLS WebSocket trade prices, and tests.
+2. **Market research — implemented:** configurable scanner, EMA, RSI, MACD,
+   Bollinger Bands, ATR, Stochastic RSI, trend direction/strength, rolling
+   support/resistance and breakout checks, volume spike/average and candle-based
+   pressure proxies, volume-price divergence, ATR and historical volatility,
+   volatility classification, and order-book spread/imbalance/depth/liquidity
+   measurements.
+3. **Signals — implemented:** configurable weighted research aggregation,
+   independent confirmation count, quality/coverage/regime gates, and
+   fee/slippage/spread-adjusted reward/risk checks. Repeated same-direction
+   signals are suppressed for the lifetime of the scanner.
+4. **Risk — not implemented:** independent limits, position sizing, and
+   protective exits.
+5. **Paper portfolio — not implemented:** persistence, ledger, and simulated
+   execution.
+6. **Backtesting — not implemented.**
+7. **Machine learning — not implemented.**
+8. **Live trading — not implemented.**
+
+Research values and signals are descriptive/advisory, not recommendations or
+claims of profitability. No position state is tracked; a suppressed signal
+does not imply an existing open position. The ATR-multiple reward/risk figure
+is a configured scenario estimate, not a statistically validated expected
+return. The displayed confidence is the absolute weighted research score, not a
+calibrated probability of profit. Volatility acts as a score dampener and
+high/sudden volatility blocks signals; it is not itself a directional
+bullish/bearish input. Candle-based buy/sell pressure is a close-location proxy,
+not exchange-reported aggressor-side trade flow. Historical volatility is the
+unannualized standard deviation of log returns for the configured candle
+window. Order-book depth is a snapshot and can change immediately. If order-book
+data is unavailable, the configured maximum spread is used conservatively in
+the cost estimate and the missing component reduces research coverage.
 
 ## Dependencies
 
 - C++20 compiler and CMake 3.24+
-- libcurl development files
-- Boost 1.74+ (System component; Beast is header-only)
-- OpenSSL development files
-- CMake downloads nlohmann/json 3.11.3, spdlog 1.14.1, and GoogleTest 1.14.0
-  with FetchContent
+- libcurl, Boost.Asio/Beast, Boost.System, and OpenSSL (declared by `vcpkg.json`)
+- nlohmann/json 3.11.3, spdlog 1.14.1, and GoogleTest 1.14.0, fetched by CMake
 
-On Windows, install a Visual Studio C++ workload and CMake, plus Boost, OpenSSL,
-and libcurl development packages. Ensure their CMake package/config files are
-discoverable (for example via `CMAKE_PREFIX_PATH`). The first configure requires
-network access to fetch the three pinned CMake dependencies.
+On Windows, install Visual Studio C++ Build Tools, CMake, and vcpkg. Set
+`VCPKG_ROOT` to the vcpkg installation directory. The first build requires
+network access to fetch the pinned CMake dependencies and vcpkg packages.
 
-The included `vcpkg.json` declares the native packages. With vcpkg installed,
-configure CMake with its toolchain file so those dependencies are installed
-automatically:
+## Build and test (Windows PowerShell)
 
-```powershell
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-```
-
-If `VCPKG_ROOT` is not set, replace it with the path where you installed vcpkg.
-
-## Build and test (PowerShell)
-
-On Windows, with `VCPKG_ROOT` set to the vcpkg installation directory, run
-these commands from the `crypto-ai-trader` directory:
+Run from the project directory:
 
 ```powershell
 cmake --preset windows-vcpkg
@@ -75,33 +85,40 @@ cmake --build --preset windows-release
 ctest --preset windows-release
 ```
 
-## Usage
+VS Code CMake Tools is configured to use the included `windows-vcpkg` configure
+preset and `windows-release` build/test presets.
 
-The default config path is `config/config.json`; an alternate path can be
-provided as the final argument.
+## Commands
+
+The default config path is `config/config.json`; commands accept an alternate
+config path as shown:
 
 ```powershell
-.\build\Release\crypto-ai-trader.exe --candles BTCUSDT
-.\build\Release\crypto-ai-trader.exe --stream BTCUSDT
+.\build\Release\crypto-ai-trader.exe --candles BTCUSDT [config-path]
+.\build\Release\crypto-ai-trader.exe --stream BTCUSDT [config-path]
+.\build\Release\crypto-ai-trader.exe --scan-once [config-path]
+.\build\Release\crypto-ai-trader.exe --scan [config-path]
 ```
 
-Symbols passed on the command line must also be listed in `trading_pairs`.
-`--stream` reconnects after network failures using the configured delay. Press
-Ctrl+C to request shutdown. REST and TLS certificate verification are enabled.
-WebSocket DNS, TCP, TLS, handshake, and read operations are bounded by
-`request_timeout_seconds`; outbound access to `stream.binance.com:9443` is
-required for live prices.
+`--scan-once` researches every configured pair once. `--scan` repeats at the
+configured interval; press Ctrl+C to request shutdown. Individual market-data
+failures are logged and reported without preventing the remaining pairs from
+being scanned. Scan output includes the signal action, signed research score,
+confidence, available-weight coverage, confirmations, estimated net reward/risk,
+estimated round-trip costs, component scores, and the decision's explanations.
+
+REST and WebSocket TLS certificate verification are enabled. REST requests use
+the configured timeout; WebSocket DNS, TCP, TLS, handshake, and read operations
+are bounded by `request_timeout_seconds`. Live WebSocket access requires
+outbound connectivity to `stream.binance.com:9443`.
 
 ## Configuration and safety
 
-`config/config.json` contains the exchange endpoints, configured symbols,
-candle interval/limit, timeouts, reconnect delay, and log level. The Phase 1
-mode is intentionally restricted to `paper`; configuration validation rejects
-`live`. No API credentials are used or stored.
-
-Binance rate limits, availability, and market-data accuracy remain external
-dependencies. This project makes no claim of profitability.
-=======
-# ai_bot_crypto
-crypto-ai
->>>>>>> ce93d6f92ea783ea80c6666d9c2cad5a9a7e7e96
+`config/config.json` defines the paper-only mode, Binance endpoints, selected
+symbols, candle settings, connection timeouts, scan interval, and research
+periods and thresholds. Signal settings define weights, thresholds, required
+confirmations, ATR-based expected reward/risk multiples, taker fees, slippage,
+and maximum acceptable spread. Sentiment currently has zero weight because no
+sentiment provider is implemented. Order-book depth must use a supported
+Binance depth limit. Invalid or inconsistent settings are rejected. No API
+credentials are used or stored, and this phase cannot place orders.

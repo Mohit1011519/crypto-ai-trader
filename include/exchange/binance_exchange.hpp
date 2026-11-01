@@ -16,6 +16,9 @@ public:
         const std::string& symbol,
         const std::string& interval,
         int limit) const override;
+    market::OrderBook fetch_order_book(
+        const std::string& symbol,
+        int depth) const override;
 
 private:
     common::AppConfig config_;
