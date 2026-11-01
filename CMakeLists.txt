@@ -29,9 +29,11 @@ set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json spdlog)
 
 add_library(crypto_trader
+    src/backtest/backtester.cpp
     src/ai/signal_engine.cpp
     src/common/config.cpp
     src/common/logger.cpp
+    src/execution/order_executor.cpp
     src/exchange/binance_exchange.cpp
     src/exchange/binance_market_stream.cpp
     src/indicators/technical_indicators.cpp
@@ -40,6 +42,7 @@ add_library(crypto_trader
     src/market/trend_analysis.cpp
     src/market/volatility_analysis.cpp
     src/market/volume_analysis.cpp
+    src/ml/ml_evaluator.cpp
     src/paper/paper_portfolio.cpp
     src/risk/risk_manager.cpp
 )
@@ -78,7 +81,10 @@ if(BUILD_TESTING)
 
     add_executable(crypto_trader_tests
         tests/config_tests.cpp
+        tests/order_executor_tests.cpp
+        tests/backtester_tests.cpp
         tests/market_research_tests.cpp
+        tests/ml_evaluator_tests.cpp
         tests/paper_portfolio_tests.cpp
         tests/risk_manager_tests.cpp
         tests/signal_engine_tests.cpp

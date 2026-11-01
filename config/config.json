@@ -1,6 +1,7 @@
 {
   "exchange": "binance",
   "mode": "paper",
+  "live_order_submission_enabled": false,
   "paper_initial_balance": 10000.0,
   "paper_state_path": "data/paper_portfolio.json",
   "rest_base_url": "https://api.binance.com",

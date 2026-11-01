@@ -103,7 +103,9 @@ AppConfig parse_config(const nlohmann::json& json) {
             .slippage_rate = risk.at("slippage_rate").get<double>()
         },
         .paper_initial_balance = json.at("paper_initial_balance").get<double>(),
-        .paper_state_path = json.at("paper_state_path").get<std::string>()
+        .paper_state_path = json.at("paper_state_path").get<std::string>(),
+        .live_order_submission_enabled =
+            json.at("live_order_submission_enabled").get<bool>()
     };
 
     require_non_empty(config.exchange, "exchange");
@@ -280,6 +282,10 @@ AppConfig parse_config(const nlohmann::json& json) {
         config.paper_initial_balance <= 0.0 ||
         config.paper_state_path.empty()) {
         throw std::invalid_argument("Paper portfolio settings require a positive initial balance and state path");
+    }
+    if (config.live_order_submission_enabled) {
+        throw std::invalid_argument(
+            "Live order submission is unavailable; live_order_submission_enabled must remain false");
     }
 
     return config;

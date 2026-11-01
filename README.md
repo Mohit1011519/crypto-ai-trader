@@ -1,12 +1,14 @@
 # Crypto AI Trader
 
-Modular C++20 cryptocurrency market-data, research, signal, risk-analysis, and
-paper-portfolio foundation. Phases 1 through 5 provide public Binance market
-data, advisory BUY/SELL/HOLD signals, risk sizing, and locally simulated
-positions with a persistent execution ledger. The application does not
-authenticate or place exchange orders.
+Modular C++20 cryptocurrency market-data, research, signal, risk-analysis,
+paper-portfolio, backtesting, and machine-learning research foundation. The
+project includes a dry-run execution interface, but live order submission is
+disabled and no exchange orders are placed.
 
 ## Architecture
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for component responsibilities, data
+flows, persistence boundaries, execution safeguards, and known limitations.
 
 ```text
 config/config.json
@@ -22,9 +24,12 @@ config/config.json
                                        |      +--> order-book research
                                        +--> SignalEngine --> research report
                                                     |
-                                                    +--> RiskManager (explicit account snapshot)
+                                                    +--> RiskManager (account snapshot)
                                                                |
                                                                +--> PaperPortfolio --> local state/ledger
+                                                               +--> Backtester / ML evaluator
+                                                               +--> DryRunOrderExecutor
+                                                                    DisabledLiveOrderExecutor
 ```
 
 `Exchange` is an abstraction for public market-data calls. The scanner uses it
@@ -56,13 +61,24 @@ inventing data.
    position ledger, risk-approved simulated spot buys, simulated sell/stop/
    target exits, and fee/slippage-aware paper fills. It is not connected to
    exchange order endpoints.
-6. **Backtesting — not implemented.**
-7. **Machine learning — not implemented.**
-8. **Live trading — not implemented.**
+6. **Backtesting — implemented:** chronological single-symbol historical
+   simulation using completed-bar research, next-bar-open entries, the shared
+   signal and risk rules, transaction costs, stop-first same-bar ambiguity,
+   equity/drawdown and return metrics, and comparison to buy-and-hold.
+7. **Machine learning — implemented:** a deterministic, regularized logistic
+   classifier with past-only candle features, cost-adjusted forward labels,
+   chronological train/holdout split with label-overlap purging, and holdout
+   classification metrics. It is an offline research evaluation and does not
+   alter signals, paper trading, or live execution.
+8. **Execution boundary — dry-run only:** a validated order-executor interface,
+   simulated preview adapter, and always-rejecting live adapter. Authenticated
+   exchange execution, API credentials, and real order placement are not
+   implemented; configuration rejects attempts to enable them.
 
 Research values and signals are descriptive/advisory, not recommendations or
-claims of profitability. No position state is tracked; a suppressed signal
-does not imply an existing open position. The ATR-multiple reward/risk figure
+claims of profitability. Live scan signals do not use the paper portfolio's
+position state; a suppressed signal does not imply an existing open position.
+The ATR-multiple reward/risk figure
 is a configured scenario estimate, not a statistically validated expected
 return. The displayed confidence is the absolute weighted research score, not a
 calibrated probability of profit. Volatility acts as a score dampener and
@@ -111,6 +127,10 @@ config path as shown:
 .\build\Release\crypto-ai-trader.exe --paper [config-path]
 .\build\Release\crypto-ai-trader.exe --paper-status [config-path]
 .\build\Release\crypto-ai-trader.exe --paper-reset [config-path]
+.\build\Release\crypto-ai-trader.exe --backtest BTCUSDT [config-path]
+.\build\Release\crypto-ai-trader.exe --ml-evaluate BTCUSDT [config-path]
+.\build\Release\crypto-ai-trader.exe --execution-status [config-path]
+.\build\Release\crypto-ai-trader.exe --execution-dry-run BTCUSDT buy 0.001 [config-path]
 ```
 
 `--scan-once` researches every configured pair once. `--scan` repeats at the
@@ -131,6 +151,39 @@ file takes precedence over a later change to `paper_initial_balance`.
 fetches fresh market data, updates marks and applicable exits, and then resets
 the latched risk shutdown only if configured limits are safe. The path is local
 application state and should be backed up before manual edits.
+
+`--execution-status` reports the configured safety boundary.
+`--execution-dry-run` fetches public candles and previews a requested quantity
+against the last candle close; it is not a live quote, risk approval, paper fill,
+or exchange order. The executor returns a simulation-only result and does not
+persist it. The disabled live adapter rejects every request.
+`live_order_submission_enabled` must remain `false`; configuration loading
+fails if it is set to `true`.
+
+`--backtest SYMBOL` fetches the configured number of recent public candles and
+simulates one symbol without modifying the paper account or state file. Each
+signal is calculated using only bars already closed; entries occur at the
+following bar's open. Protective stops and targets are checked against each
+bar's high/low; if both trigger in one bar, the stop is assumed first. Gaps
+through a stop fill at the open, while targets are assumed to fill at their
+target price. Since historical order-book data is unavailable, the configured
+maximum spread is applied conservatively. Backtest metrics include final equity,
+strategy and buy-and-hold returns, maximum drawdown, an unannualized per-bar
+Sharpe ratio, completed trade counts, and profit factor when there are losses.
+The configured candle limit bounds the available history; this is a research
+simulation, not a forecast or execution-quality guarantee.
+
+`--ml-evaluate SYMBOL` fits a small L2-regularized logistic classifier on the
+first 70% of chronological samples and reports metrics on a later holdout.
+Six candle-only features use data available at the sample close; the binary
+label asks whether the following five-candle log return exceeded estimated
+round-trip fees, slippage, and configured maximum spread. Training labels that
+would extend into the holdout are purged, and feature normalization is fit only
+on the training subset. Reported accuracy, precision, recall, log loss,
+Brier score, and ROC-AUC (when both classes occur) describe that limited sample;
+they are not calibrated profitability estimates. The model is retrained for
+each command, is not persisted, and is not wired into BUY/SELL signals or paper
+execution.
 
 REST and WebSocket TLS certificate verification are enabled. REST requests use
 the configured timeout; WebSocket DNS, TCP, TLS, handshake, and read operations

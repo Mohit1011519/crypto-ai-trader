@@ -11,6 +11,7 @@ nlohmann::json valid_config() {
     return {
         {"exchange", "binance"},
         {"mode", "paper"},
+        {"live_order_submission_enabled", false},
         {"paper_initial_balance", 10000.0},
         {"paper_state_path", "data/paper_portfolio.json"},
         {"rest_base_url", "https://api.binance.com"},
@@ -95,6 +96,7 @@ TEST(ConfigTests, ParsesValidPaperConfiguration) {
     EXPECT_DOUBLE_EQ(config.risk.risk_per_trade_fraction, 0.005);
     EXPECT_EQ(config.risk.maximum_open_positions, 3);
     EXPECT_DOUBLE_EQ(config.paper_initial_balance, 10000.0);
+    EXPECT_FALSE(config.live_order_submission_enabled);
 }
 
 TEST(ConfigTests, RejectsLiveModeInPhaseOne) {
@@ -167,4 +169,10 @@ TEST(ConfigTests, RejectsInvalidPaperPortfolioSettings) {
     auto missing_state_path = valid_config();
     missing_state_path["paper_state_path"] = "";
     EXPECT_THROW(crypto_trader::common::parse_config(missing_state_path), std::invalid_argument);
+}
+
+TEST(ConfigTests, RejectsEnablingLiveOrderSubmission) {
+    auto config = valid_config();
+    config["live_order_submission_enabled"] = true;
+    EXPECT_THROW(crypto_trader::common::parse_config(config), std::invalid_argument);
 }

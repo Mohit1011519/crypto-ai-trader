@@ -82,6 +82,7 @@ struct AppConfig {
     RiskSettings risk;
     double paper_initial_balance;
     std::filesystem::path paper_state_path;
+    bool live_order_submission_enabled;
 };
 
 AppConfig parse_config(const nlohmann::json& json);

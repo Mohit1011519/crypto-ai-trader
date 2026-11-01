@@ -227,7 +227,8 @@ crypto_trader::common::AppConfig scanner_config() {
             .slippage_rate = 0.0005
         },
         .paper_initial_balance = 10000.0,
-        .paper_state_path = "test-paper-state.json"
+        .paper_state_path = "test-paper-state.json",
+        .live_order_submission_enabled = false
     };
 }
 

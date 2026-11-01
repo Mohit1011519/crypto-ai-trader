@@ -1,16 +1,21 @@
 #include "common/config.hpp"
 #include "common/logger.hpp"
+#include "backtest/backtester.hpp"
+#include "execution/order_executor.hpp"
 #include "exchange/binance_exchange.hpp"
 #include "exchange/binance_market_stream.hpp"
 #include "market/market_scanner.hpp"
+#include "ml/ml_evaluator.hpp"
 #include "paper/paper_portfolio.hpp"
 #include "risk/risk_manager.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <csignal>
 #include <iomanip>
 #include <iostream>
+#include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -37,6 +42,10 @@ void print_usage() {
               << "  crypto-ai-trader --paper [config-path]\n"
               << "  crypto-ai-trader --paper-status [config-path]\n"
               << "  crypto-ai-trader --paper-reset [config-path]\n"
+              << "  crypto-ai-trader --backtest SYMBOL [config-path]\n"
+              << "  crypto-ai-trader --ml-evaluate SYMBOL [config-path]\n"
+              << "  crypto-ai-trader --execution-status [config-path]\n"
+              << "  crypto-ai-trader --execution-dry-run SYMBOL buy|sell QUANTITY [config-path]\n"
               << "  crypto-ai-trader --help\n";
 }
 
@@ -335,6 +344,138 @@ int run_paper(const crypto_trader::common::AppConfig& config,
     return 0;
 }
 
+int run_backtest(const crypto_trader::common::AppConfig& config,
+                 const std::string& symbol) {
+    crypto_trader::exchange::BinanceExchange exchange(config);
+    const auto candles = exchange.fetch_candles(
+        symbol, config.candle_interval, config.candle_limit);
+    const auto result = crypto_trader::backtest::Backtester(config).run(symbol, candles);
+
+    std::cout << "\nHistorical Backtest (public candles; simulated fills only)\n"
+              << "Symbol=" << result.symbol
+              << " Candles=" << result.candles_processed
+              << " StartingEquity=" << std::fixed << std::setprecision(2)
+              << result.initial_equity
+              << " FinalEquity=" << result.final_equity
+              << " StrategyReturn=" << std::setprecision(2)
+              << result.total_return_fraction * 100.0 << '%'
+              << " BuyAndHold=" << result.buy_and_hold_return_fraction * 100.0 << '%'
+              << " MaxDrawdown=" << result.maximum_drawdown_fraction * 100.0 << '%'
+              << " PerBarSharpe=" << result.per_bar_sharpe_ratio
+              << " Trades=" << result.completed_trades
+              << " Wins=" << result.winning_trades
+              << " Losses=" << result.losing_trades
+              << " ProfitFactor=";
+    print_optional(result.profit_factor);
+    std::cout << " RiskShutdown=" << (result.risk_shutdown ? "YES" : "NO") << '\n';
+    for (const auto& trade : result.trades) {
+        std::cout << trade.symbol << ' ' << trade.exit_reason
+                  << " Qty=" << std::setprecision(8) << trade.quantity
+                  << " Entry=" << std::setprecision(4) << trade.entry_price
+                  << " Exit=" << trade.exit_price
+                  << " Fees=" << trade.fees
+                  << " NetPnL=" << trade.net_pnl << '\n';
+    }
+    std::cout << "Signals use completed bars; entries are at the next bar open. "
+                 "If stop and target both touch within one bar, stop is assumed first. "
+                 "Order-book history is unavailable; configured maximum spread is used. "
+                 "Results are historical simulation, not a profit forecast.\n";
+    return 0;
+}
+
+int run_ml_evaluation(const crypto_trader::common::AppConfig& config,
+                      const std::string& symbol) {
+    crypto_trader::exchange::BinanceExchange exchange(config);
+    const auto candles = exchange.fetch_candles(
+        symbol, config.candle_interval, config.candle_limit);
+    const auto result = crypto_trader::ml::MlEvaluator(config).evaluate(candles);
+
+    std::cout << "\nMachine-Learning Walk-Forward Holdout (advisory research only)\n"
+              << "Symbol=" << symbol
+              << " Candles=" << result.candles_processed
+              << " Horizon=" << result.horizon_candles
+              << " TrainSamples=" << result.training_samples
+              << " ValidationSamples=" << result.validation_samples
+              << " ValidationPositiveRate=" << std::fixed << std::setprecision(3)
+              << result.validation_positive_rate
+              << " Accuracy=" << result.validation_accuracy
+              << " TrainingMajorityBaseline="
+              << result.majority_class_baseline_accuracy
+              << " Precision=" << result.precision
+              << " Recall=" << result.recall
+              << " LogLoss=" << result.log_loss
+              << " BrierScore=" << result.brier_score
+              << " ROC-AUC=";
+    print_optional(result.roc_auc, 3);
+    std::cout << '\n'
+              << "Uses a five-candle forward label net of estimated costs, "
+                 "past-only features, and a purged chronological holdout. "
+                 "Metrics are not calibrated profitability estimates.\n";
+    return 0;
+}
+
+crypto_trader::risk::OrderSide parse_order_side(const std::string& value) {
+    if (value == "buy") {
+        return crypto_trader::risk::OrderSide::buy;
+    }
+    if (value == "sell") {
+        return crypto_trader::risk::OrderSide::sell;
+    }
+    throw std::invalid_argument("Order side must be 'buy' or 'sell'");
+}
+
+double parse_quantity(const std::string& value) {
+    double quantity = 0.0;
+    const auto [end, error] = std::from_chars(
+        value.data(), value.data() + value.size(), quantity);
+    if (error != std::errc{} || end != value.data() + value.size() ||
+        !std::isfinite(quantity) || quantity <= 0.0) {
+        throw std::invalid_argument("Order quantity must be a finite positive number");
+    }
+    return quantity;
+}
+
+int show_execution_status(const crypto_trader::common::AppConfig& config) {
+    std::cout << "Execution safety status\n"
+              << "Configured mode: " << config.mode << '\n'
+              << "Dry-run interface: available (simulated preview only)\n"
+              << "Live order submission: "
+              << (config.live_order_submission_enabled ? "ENABLED" : "DISABLED") << '\n'
+              << "Live order adapter: unavailable; all live submissions are rejected\n";
+    return 0;
+}
+
+int run_execution_dry_run(const crypto_trader::common::AppConfig& config,
+                          const std::string& symbol,
+                          const std::string& side_text,
+                          const std::string& quantity_text) {
+    const auto side = parse_order_side(side_text);
+    const double quantity = parse_quantity(quantity_text);
+    crypto_trader::exchange::BinanceExchange exchange(config);
+    const auto candles = exchange.fetch_candles(
+        symbol, config.candle_interval, config.candle_limit);
+    if (candles.empty()) {
+        throw std::runtime_error("No market candle available for the dry-run preview");
+    }
+
+    const crypto_trader::execution::DryRunOrderExecutor executor;
+    const auto result = executor.submit({
+        .symbol = symbol,
+        .side = side,
+        .quantity = quantity,
+        .reference_price = candles.back().close
+    });
+    std::cout << "DRY RUN ONLY — no order submitted\n"
+              << "Status=" << crypto_trader::execution::to_string(result.status)
+              << " Side=" << crypto_trader::execution::to_string(result.request.side)
+              << " Symbol=" << result.request.symbol
+              << " Quantity=" << std::setprecision(8) << result.request.quantity
+              << " ReferencePrice=" << std::setprecision(4) << result.request.reference_price
+              << " ReferenceNotional=" << result.reference_notional
+              << "\n" << result.message << '\n';
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -351,18 +492,26 @@ int main(int argc, char* argv[]) {
         const std::string command = argv[1];
         const bool scanner_command = command == "--scan" || command == "--scan-once" ||
             command == "--paper" || command == "--paper-once" ||
-            command == "--paper-status" || command == "--paper-reset";
+            command == "--paper-status" || command == "--paper-reset" ||
+            command == "--execution-status";
+        const bool dry_run_command = command == "--execution-dry-run";
         if (scanner_command && (argc < 2 || argc > 3)) {
             print_usage();
             return 2;
         }
-        if (!scanner_command && (argc < 3 || argc > 4)) {
+        if (dry_run_command && (argc < 5 || argc > 6)) {
+            print_usage();
+            return 2;
+        }
+        if (!scanner_command && !dry_run_command && (argc < 3 || argc > 4)) {
             print_usage();
             return 2;
         }
         const std::string config_path = scanner_command
             ? (argc == 3 ? argv[2] : "config/config.json")
-            : (argc == 4 ? argv[3] : "config/config.json");
+            : dry_run_command
+                ? (argc == 6 ? argv[5] : "config/config.json")
+                : (argc == 4 ? argv[3] : "config/config.json");
         const auto config = crypto_trader::common::load_config(config_path);
         crypto_trader::common::initialize_logging(config.log_level);
 
@@ -373,10 +522,24 @@ int main(int argc, char* argv[]) {
             command == "--paper-status" || command == "--paper-reset") {
             return run_paper(config, command);
         }
+        if (command == "--execution-status") {
+            return show_execution_status(config);
+        }
+        if (dry_run_command) {
+            const std::string symbol = argv[2];
+            require_configured_symbol(config, symbol);
+            return run_execution_dry_run(config, symbol, argv[3], argv[4]);
+        }
 
         const std::string symbol = argv[2];
         require_configured_symbol(config, symbol);
 
+        if (command == "--backtest") {
+            return run_backtest(config, symbol);
+        }
+        if (command == "--ml-evaluate") {
+            return run_ml_evaluation(config, symbol);
+        }
         if (command == "--candles") {
             return fetch_candles(config, symbol);
         }
