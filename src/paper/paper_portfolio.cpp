@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
+#define NOMINMAX
 #include <windows.h>
 #endif
 
@@ -76,9 +77,12 @@ bool valid_position(const PaperPosition& position) {
         std::isfinite(position.entry_price) && position.entry_price > 0.0 &&
         std::isfinite(position.mark_price) && position.mark_price > 0.0 &&
         std::isfinite(position.stop_loss_price) && position.stop_loss_price > 0.0 &&
+        position.stop_loss_price < position.entry_price &&
         std::isfinite(position.take_profit_price) &&
         position.take_profit_price > position.entry_price &&
         std::isfinite(position.entry_fee) && position.entry_fee >= 0.0 &&
+        std::isfinite(position.quantity * position.entry_price) &&
+        std::isfinite(position.quantity * position.mark_price) &&
         position.opened_at_ms > 0;
 }
 
@@ -306,14 +310,17 @@ std::vector<PaperExecution> PaperPortfolio::process_scan(
     }
 
     State next = state_;
+    std::set<std::string> result_symbols;
+    for (const auto& result : results) {
+        if (result.symbol.empty() || !result_symbols.insert(result.symbol).second) {
+            throw std::invalid_argument("Paper scan contains an empty or duplicate market symbol");
+        }
+    }
     const auto price_for = [&](const std::string& symbol) -> const market::ScanResult* {
         const market::ScanResult* found = nullptr;
         for (const auto& result : results) {
             if (result.symbol != symbol) {
                 continue;
-            }
-            if (found != nullptr) {
-                throw std::invalid_argument("Paper scan contains duplicate market symbols");
             }
             found = &result;
         }

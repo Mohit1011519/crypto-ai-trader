@@ -245,7 +245,9 @@ int scan_markets(const crypto_trader::common::AppConfig& config, const bool repe
     if (repeat) {
         spdlog::info("Scanning {} configured markets every {} seconds. Press Ctrl+C to stop.",
                      config.trading_pairs.size(), config.research.scan_interval_seconds);
-        scanner.run(stop_requested, print_scan);
+        scanner.run(stop_requested, [](const auto& results) {
+            print_scan(results);
+        });
         return 0;
     }
     print_scan(scanner.scan_once());

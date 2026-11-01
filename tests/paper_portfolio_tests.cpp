@@ -134,7 +134,7 @@ TEST(PaperPortfolio, ClosesPositionOnSellSignalAndRecordsNetRealizedPnl) {
         risk_manager, 1'800'000'000'000);
 
     const auto exits = account.process_scan(
-        {scan_result(110.0, crypto_trader::ai::Signal::sell)},
+        {scan_result(104.0, crypto_trader::ai::Signal::sell)},
         risk_manager, 1'800'000'060'000);
     ASSERT_EQ(exits.size(), 1);
     EXPECT_EQ(exits.front().side, "SELL");
@@ -143,6 +143,23 @@ TEST(PaperPortfolio, ClosesPositionOnSellSignalAndRecordsNetRealizedPnl) {
     EXPECT_TRUE(account.view().positions.empty());
     EXPECT_GT(account.view().cash_balance, 10000.0);
     EXPECT_EQ(account.execution_history().size(), 2);
+}
+
+TEST(PaperPortfolio, ClosesAtConfiguredTakeProfitWithSimulatedCosts) {
+    TemporaryState file;
+    auto account = portfolio(file);
+    crypto_trader::risk::RiskManager risk_manager(risk_settings());
+    account.process_scan(
+        {scan_result(100.0, crypto_trader::ai::Signal::buy)},
+        risk_manager, 1'800'000'000'000);
+
+    const auto exits = account.process_scan(
+        {scan_result(110.0, crypto_trader::ai::Signal::hold)},
+        risk_manager, 1'800'000'060'000);
+    ASSERT_EQ(exits.size(), 1);
+    EXPECT_EQ(exits.front().reason, "take-profit at candle close");
+    EXPECT_LT(exits.front().price, 110.0);
+    EXPECT_TRUE(account.view().positions.empty());
 }
 
 TEST(PaperPortfolio, StopLossClosesPositionAndPersistsRiskShutdown) {

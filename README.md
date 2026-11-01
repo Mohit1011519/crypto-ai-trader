@@ -149,13 +149,12 @@ Binance depth limit. `paper_initial_balance` seeds a new paper account only;
 `paper_state_path` selects its persistent state and execution ledger. Risk
 settings define per-trade equity risk (default 0.5%),
 maximum open positions (3), daily loss (2%), peak-equity drawdown (10%), gross
-exposure (100% of equity), ATR exit multiples, fees, and slippage. Risk
-monitoring requires the caller to supply current equity, available balance,
-exposure, open positions, daily starting equity/net P&L, and peak equity; the
-risk manager latches shutdown when daily loss or drawdown reaches its limit and
-requires an explicit safe reset. Sell/short orders are rejected; position
-closing is not implemented. The paper ledger maintains those account values locally, but does not reconcile
-exchange balances or external transactions. Invalid or inconsistent settings
-and corrupted ledger files are rejected instead of silently reset. No API
-credentials are used or stored, and the application cannot place exchange
-orders.
+exposure (100% of equity), ATR exit multiples, fees, and slippage. The standalone
+risk manager requires a caller-supplied snapshot; the paper portfolio constructs
+that snapshot from its local ledger. It latches shutdown when daily loss or
+drawdown reaches its limit and requires an explicit safe reset. New short orders
+are rejected; the paper simulator only sells to close positions it already
+holds. The ledger does not reconcile exchange balances or external transactions.
+Invalid or inconsistent settings and corrupted ledger files are rejected
+instead of silently reset. No API credentials are used or stored, and the
+application cannot place exchange orders.
