@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
+if(POLICY CMP0167)
+    cmake_policy(SET CMP0167 NEW)
+endif()
+
 project(crypto_ai_trader VERSION 0.1.0 LANGUAGES CXX)
 
 include(FetchContent)
@@ -32,6 +36,9 @@ add_library(crypto_trader
 )
 
 target_include_directories(crypto_trader PUBLIC include)
+if(WIN32)
+    target_compile_definitions(crypto_trader PUBLIC _WIN32_WINNT=0x0A00)
+endif()
 target_link_libraries(crypto_trader
     PUBLIC
         CURL::libcurl

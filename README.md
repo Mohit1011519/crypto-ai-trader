@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Crypto AI Trader
 
 Phase 1 foundation for a modular C++20 cryptocurrency market-data application.
@@ -96,3 +97,7 @@ mode is intentionally restricted to `paper`; configuration validation rejects
 
 Binance rate limits, availability, and market-data accuracy remain external
 dependencies. This project makes no claim of profitability.
+=======
+# ai_bot_crypto
+crypto-ai
+>>>>>>> ce93d6f92ea783ea80c6666d9c2cad5a9a7e7e96
