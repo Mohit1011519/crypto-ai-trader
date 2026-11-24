@@ -132,6 +132,8 @@ AppConfig parse_config(const nlohmann::json& json) {
             live.value("flatten_on_risk_shutdown", config.live.flatten_on_risk_shutdown);
         config.live.receive_window_ms =
             live.value("receive_window_ms", config.live.receive_window_ms);
+        config.live.real_money_acknowledged =
+            live.value("real_money_acknowledged", false);
     }
     if (json.contains("backtest")) {
         const auto& backtest = json.at("backtest");
@@ -154,9 +156,8 @@ AppConfig parse_config(const nlohmann::json& json) {
     if (config.exchange != "binance") {
         throw std::invalid_argument("Only the 'binance' exchange is supported in Phase 1");
     }
-    if (config.mode != "paper" && config.mode != "testnet") {
-        throw std::invalid_argument(
-            "mode must be 'paper' or 'testnet'; mainnet live trading is not enabled");
+    if (config.mode != "paper" && config.mode != "testnet" && config.mode != "mainnet") {
+        throw std::invalid_argument("mode must be 'paper', 'testnet', or 'mainnet'");
     }
     if (config.trading_pairs.empty()) {
         throw std::invalid_argument("Configuration field 'trading_pairs' must contain at least one pair");
@@ -331,18 +332,36 @@ AppConfig parse_config(const nlohmann::json& json) {
         config.paper_state_path.empty()) {
         throw std::invalid_argument("Paper portfolio settings require a positive initial balance and state path");
     }
+    const bool mainnet = config.mode == "mainnet";
+    const bool places_orders = config.mode == "testnet" || mainnet;
     if (config.mode == "paper" && config.live_order_submission_enabled) {
         throw std::invalid_argument(
-            "live_order_submission_enabled requires mode 'testnet'; it must be false in paper mode");
+            "live_order_submission_enabled must be false in paper mode");
     }
-    if (config.mode == "testnet" && !config.live_order_submission_enabled) {
+    if (places_orders && !config.live_order_submission_enabled) {
         throw std::invalid_argument(
-            "mode 'testnet' requires live_order_submission_enabled: true");
+            "mode '" + config.mode + "' requires live_order_submission_enabled: true");
     }
     const auto& live = config.live;
-    if (live.order_base_url != "https://testnet.binance.vision") {
+    if (mainnet) {
+        if (live.order_base_url != mainnet_order_base_url) {
+            throw std::invalid_argument(
+                std::string("mode 'mainnet' requires live.order_base_url ") +
+                mainnet_order_base_url);
+        }
+        if (!live.real_money_acknowledged) {
+            throw std::invalid_argument(
+                "mode 'mainnet' trades real money and can lose it; set "
+                "live.real_money_acknowledged: true to confirm");
+        }
+        if (live.state_path == std::filesystem::path(testnet_default_state_path)) {
+            throw std::invalid_argument(
+                "mode 'mainnet' needs its own live.state_path, separate from the testnet ledger");
+        }
+    } else if (live.order_base_url != testnet_order_base_url) {
         throw std::invalid_argument(
-            "live.order_base_url must be https://testnet.binance.vision; mainnet orders are not enabled");
+            std::string("live.order_base_url must be ") + testnet_order_base_url +
+            " unless mode is 'mainnet'");
     }
     if (live.state_path.empty() || live.quote_asset.empty() ||
         !valid_symbol(live.quote_asset) ||
@@ -354,7 +373,7 @@ AppConfig parse_config(const nlohmann::json& json) {
         live.receive_window_ms < 1 || live.receive_window_ms > 60000) {
         throw std::invalid_argument("Live execution settings are invalid");
     }
-    if (config.mode == "testnet") {
+    if (places_orders) {
         for (const auto& pair : config.trading_pairs) {
             if (pair.size() <= live.quote_asset.size() ||
                 pair.compare(pair.size() - live.quote_asset.size(),

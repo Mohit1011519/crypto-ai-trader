@@ -174,6 +174,17 @@ VenueOrder PaperVenue::query_order(const std::string&, const std::int64_t order_
     return found->second.order;
 }
 
+VenueOrder PaperVenue::query_order_by_client_id(const std::string& symbol,
+                                                const std::string& client_order_id) {
+    for (auto& [id, stop] : orders_) {
+        if (stop.symbol == symbol && stop.order.client_order_id == client_order_id) {
+            trigger_if_crossed(stop);
+            return stop.order;
+        }
+    }
+    throw exchange::BinanceApiError(400, order_does_not_exist_code, "Order does not exist");
+}
+
 VenueOrder PaperVenue::cancel_order(const std::string&, const std::int64_t order_id) {
     const auto found = orders_.find(order_id);
     if (found == orders_.end()) {

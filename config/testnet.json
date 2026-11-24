@@ -68,10 +68,10 @@
     "suppress_repeated_direction": false
   },
   "risk": {
-    "risk_per_trade_fraction": 0.0025,
+    "risk_per_trade_fraction": 0.005,
     "maximum_open_positions": 3,
-    "daily_maximum_loss_fraction": 0.02,
-    "maximum_drawdown_fraction": 0.1,
+    "daily_maximum_loss_fraction": 0.04,
+    "maximum_drawdown_fraction": 0.2,
     "maximum_gross_exposure_fraction": 1.0,
     "stop_atr_multiple": 2.0,
     "target_atr_multiple": 10.0,
@@ -88,8 +88,8 @@
     "order_base_url": "https://testnet.binance.vision",
     "state_path": "data/testnet_portfolio.json",
     "quote_asset": "USDT",
-    "capital_allocation": 100.0,
-    "maximum_order_notional": 50.0,
+    "capital_allocation": 250.0,
+    "maximum_order_notional": 100.0,
     "stop_update_minimum_fraction": 0.002,
     "flatten_on_risk_shutdown": true,
     "receive_window_ms": 5000

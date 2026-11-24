@@ -37,6 +37,9 @@ enum class OrderState {
     expired
 };
 
+// Binance error code for an order lookup that found no such order.
+inline constexpr int order_does_not_exist_code = -2013;
+
 struct VenueOrder {
     std::int64_t order_id;
     std::string client_order_id;
@@ -44,6 +47,8 @@ struct VenueOrder {
     double executed_quantity;
     double quote_quantity;
     double base_commission;
+    // Commission in the quote asset, plus any commission paid in a third asset
+    // (BNB) converted to quote, so the ledger is charged for every fee.
     double quote_commission;
 };
 
@@ -69,6 +74,11 @@ public:
                                               double stop_price,
                                               const std::string& client_order_id) = 0;
     virtual VenueOrder query_order(const std::string& symbol, std::int64_t order_id) = 0;
+    // Looks an order up by the client order id it was submitted with. Throws
+    // exchange::BinanceApiError with order_does_not_exist_code if the venue
+    // never received it; used to recover an entry whose result was lost.
+    virtual VenueOrder query_order_by_client_id(const std::string& symbol,
+                                                const std::string& client_order_id) = 0;
     // Returns the order's final state; a stop that filled before the cancel
     // arrived is reported as filled rather than as an error.
     virtual VenueOrder cancel_order(const std::string& symbol, std::int64_t order_id) = 0;
@@ -93,6 +103,8 @@ public:
                                       double stop_price,
                                       const std::string& client_order_id) override;
     VenueOrder query_order(const std::string& symbol, std::int64_t order_id) override;
+    VenueOrder query_order_by_client_id(const std::string& symbol,
+                                        const std::string& client_order_id) override;
     VenueOrder cancel_order(const std::string& symbol, std::int64_t order_id) override;
 
 private:

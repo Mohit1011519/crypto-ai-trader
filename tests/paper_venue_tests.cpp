@@ -32,6 +32,10 @@ public:
     crypto_trader::execution::VenueOrder query_order(const std::string&, std::int64_t) override {
         throw std::logic_error("unused");
     }
+    crypto_trader::execution::VenueOrder query_order_by_client_id(
+        const std::string&, const std::string&) override {
+        throw std::logic_error("unused");
+    }
     crypto_trader::execution::VenueOrder cancel_order(const std::string&, std::int64_t) override {
         throw std::logic_error("unused");
     }

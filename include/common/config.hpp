@@ -90,13 +90,18 @@ struct BacktestSettings {
     std::optional<double> spread_fraction;
 };
 
-// Order execution against Binance Spot Testnet. Mainnet order endpoints are
-// rejected by configuration validation. API credentials are read from the
-// BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET environment variables
-// and are never stored in configuration or state files.
+inline constexpr const char* testnet_order_base_url = "https://testnet.binance.vision";
+inline constexpr const char* mainnet_order_base_url = "https://api.binance.com";
+inline constexpr const char* testnet_default_state_path = "data/testnet_portfolio.json";
+
+// Order execution against Binance Spot Testnet (mode "testnet") or, with an
+// explicit real-money acknowledgement, Binance Spot mainnet (mode "mainnet").
+// API credentials are read from BINANCE_TESTNET_API_KEY / _SECRET (testnet) or
+// BINANCE_API_KEY / BINANCE_API_SECRET (mainnet) and are never stored in
+// configuration or state files.
 struct LiveSettings {
-    std::string order_base_url = "https://testnet.binance.vision";
-    std::filesystem::path state_path = "data/testnet_portfolio.json";
+    std::string order_base_url = testnet_order_base_url;
+    std::filesystem::path state_path = testnet_default_state_path;
     std::string quote_asset = "USDT";
     // Starting quote capital the bot manages. Its ledger grows with profits and
     // shrinks with losses; the bot never spends more than that ledger or the
@@ -110,6 +115,9 @@ struct LiveSettings {
     // Sell every position when the daily-loss or drawdown limit trips.
     bool flatten_on_risk_shutdown = true;
     int receive_window_ms = 5000;
+    // Mode "mainnet" refuses to start unless this is true: a typo or a copied
+    // testnet config can never place real-money orders by accident.
+    bool real_money_acknowledged = false;
 };
 
 struct AppConfig {

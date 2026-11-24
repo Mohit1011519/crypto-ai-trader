@@ -4,17 +4,21 @@
 
 This C++20 application is an automated, long-only cryptocurrency trading bot
 for Binance spot markets. It reads public market data, generates
-trend-following signals, applies risk limits, and executes through one of two
+trend-following signals, applies risk limits, and executes through one of three
 venues:
 
 - **Paper** — a simulated exchange priced from live public Binance data.
 - **Testnet** — real orders on Binance Spot Testnet (no real money).
+- **Mainnet** — real orders with real money on Binance Spot.
 
-**Mainnet (real-money) orders are not enabled.** Configuration validation only
-accepts `https://testnet.binance.vision` as the order endpoint, and testnet mode
-requires both `mode: "testnet"` and `live_order_submission_enabled: true`. API
-keys are read from `BINANCE_TESTNET_API_KEY` / `BINANCE_TESTNET_API_SECRET` and
-are never written to configuration, state, or logs.
+Mainnet is opt-in at several independent layers. It needs `mode: "mainnet"`,
+`live_order_submission_enabled: true`, `live.order_base_url:
+"https://api.binance.com"`, `live.real_money_acknowledged: true`, and a
+`live.state_path` separate from the testnet ledger. Outside mainnet mode, only
+`https://testnet.binance.vision` is accepted as the order endpoint. Testnet keys
+come from `BINANCE_TESTNET_API_KEY` / `_SECRET` and mainnet keys from
+`BINANCE_API_KEY` / `BINANCE_API_SECRET`, so a key can never be sent to the
+wrong network. Keys are never written to configuration, state, or logs.
 
 Paper and testnet run the **same** `LiveTrader` code path; only the venue
 differs. The backtester uses the same signal engine, risk manager, and exit
@@ -26,7 +30,7 @@ rules on historical candles, trading every pair from one shared account.
 flowchart LR
     Config[config/*.json]
     Public[Binance public REST<br/>candles, book, filters]
-    Testnet[Binance Spot Testnet<br/>signed REST orders]
+    Testnet[Binance Spot Testnet or mainnet<br/>signed REST orders]
     State[(Ledger + venue state<br/>atomic JSON)]
     Alerts[Telegram, optional]
 
@@ -39,7 +43,7 @@ flowchart LR
     Exits[Exit rules] --> Trader
     Trader --> Venue{{SpotVenue}}
     Venue -->|paper| PaperVenue[PaperVenue<br/>simulated fills]
-    Venue -->|testnet| BinanceVenue[BinanceSpotVenue]
+    Venue -->|testnet / mainnet| BinanceVenue[BinanceSpotVenue]
     PaperVenue -->|prices, filters| Public
     BinanceVenue --> Testnet
     Trader <--> State
@@ -63,8 +67,11 @@ flowchart LR
 | Bot-side backup exit | Each cycle the bot also sells at market if the best bid is at or below the ratcheted stop, at the take-profit, or on a sell/trend-break signal. |
 | Daily pause | Losing `risk.daily_maximum_loss_fraction` (2%) in a UTC day blocks new entries until the next UTC day. Open positions keep their stops. |
 | Drawdown kill switch | Falling `risk.maximum_drawdown_fraction` (10%) below peak equity halts trading permanently and, with `live.flatten_on_risk_shutdown`, sells every position. Only `--live-reset` / `--paper-reset` resumes, and only if limits are within bounds. `--live-flatten` triggers it manually. |
-| Idempotent orders | Every order carries a persisted unique client order id. If a request times out or returns HTTP 5xx, the bot queries the order by that id instead of guessing; an unresolved buy halts trading. |
+| Idempotent orders | Every order carries a persisted unique client order id. If a request times out or returns HTTP 5xx, the bot queries the order by that id instead of guessing. A failed lookup is treated as "outcome unknown", never as "rejected". An unresolved buy halts new entries. |
+| Entry journal | Each entry is persisted as `pending_entry` before the buy is sent. Every cycle (and `--live-flatten`) looks a pending entry up by client order id. If it filled, the position is booked and gets its exchange stop. If it never reached the exchange, it is cleared. No new entries are made while one is pending. This closes the gap where a crash or lost response right after a fill would leave an untracked, unprotected position. |
+| Fee-safe sizing | A filled order is never discarded because the commission lookup failed. The booked quantity is clamped to the account's free base balance, so the stop never exceeds what is held. Fees paid in BNB are valued in the quote asset and charged to the ledger. |
 | Crash safety | State is written atomically after every order. Each cycle reconciles stops against the exchange (filled, cancelled, or missing stops are detected), and the last candle each pair was bought on is persisted so a restart never re-buys the same signal. |
+| Mainnet pre-flight | Before every mainnet trading session the bot reads `/sapi/v1/account/apiRestrictions`. It refuses keys that can withdraw or that lack spot-trading or read permission (missing fields fail closed), and warns about keys without an IP restriction or with transfer, margin, futures, or options rights. It also requires `canTrade`, warns if the free quote balance is below the allocation, and logs the real-money limits. Status, flatten, and reset skip this check so an emergency exit is never blocked. |
 | Unattended operation | `deploy/crypto-ai-trader.service` runs the bot as a systemd user service with automatic restart; optional Telegram alerts report every trade, halt, and error. |
 
 No safeguard can guarantee against loss: stop-market orders can fill below the
@@ -123,6 +130,43 @@ spread on every fill, stop-first when a bar touches both stop and target.
 | 1% | +36.5% | +98% | 10.1% | −3.1% | −8.9% | triggered early |
 
 Yearly at 0.25%: 2023 (Nov–Dec) +2.2%, 2024 +11.6%, 2025 +7.8%, 2026 −4.3%.
+
+**Out-of-sample check (Nov 2026).** The parameters above were chosen on
+Nov 2023 – Nov 2026. Rerunning the unchanged default strategy on 15,000 4h
+candles (Jan 2020 – Nov 2026) adds roughly four years it was never tuned on:
+
+| Variant | Return | Max drawdown | Profit factor | Kill switch |
+|---|---|---|---|---|
+| **Default (0.25% risk)** | **+47.0%** | **8.1%** | **1.56** | not triggered |
+| + pullback-in-uptrend entries | +2.4% | 10.3% | 1.04 | triggered in 2023 |
+| 0.5% risk | +37.8% | 10.2% | 1.61 | triggered in 2022, idle after |
+
+Default strategy in the untouched years: 2020 +7.8% (profit factor 1.70),
+2021 +10.7% (1.83), 2022 −3.9% (0.31) while the five coins fell 52–94%, 2023 +11.4%
+(2.12). Equal-weight buy-and-hold returned +1457% over the same window, with
+far deeper drawdowns. `--backtest-all` now also prints trades and profit factor
+by year.
+
+**Robustness checks (Nov 2026, same window, default 5 coins unless noted):**
+
+| Test | Return | Max drawdown | Profit factor | Kill switch |
+|---|---|---|---|---|
+| Stop 1.5 / 2.5 ATR | +54.6% / +36.2% | 9.4% / 7.4% | 1.54 / 1.52 | no / no |
+| Trailing stop 3 / 5 ATR | +40.0% / +48.4% | 7.4% / 8.4% | 1.49 / 1.57 | no / no |
+| Breakout window 35 / 70 bars | +46.2% / +45.4% | 8.1% / 7.6% | 1.52 / 1.60 | no / no |
+| Double fees, slippage and spread | +27.5% | 8.0% | 1.35 | no |
+| 10 coins never used in development (ADA, DOGE, LTC, LINK, DOT, AVAX, ATOM, TRX, ETC, FIL) | +7.4% | 10.0% | 1.15 | triggered in 2023 |
+
+Across 526 trades from single-coin runs of the five default coins, the mean
+trade is positive (t = 3.6; bootstrap P(mean ≤ 0) ≈ 0.0001), and the total
+stays positive without the five best trades. The result does not hinge on
+exact settings and survives doubled costs. Trades in correlated coins are not
+independent, so the t-statistic overstates certainty.
+
+The edge is much weaker on coins outside the development set: several of them
+fell for years after 2021, and the kill switch stopped that run. Part of the
+default result therefore comes from trading the strongest large coins, so
+adding more pairs is not a free improvement.
 At 0.5% with doubled fees and 5× spread the strategy still returned +28.7%
 (profit factor 1.49).
 
@@ -135,6 +179,39 @@ Findings that shaped the design:
   the default.
 - A daily-loss limit that latched permanently stopped the bot for over a year
   after one bad day; it now pauses until the next UTC day.
+- Faster timeframes lose to fees. The same rules on 1h, 15m and 5m candles
+  gave profit factors of 0.87, 0.37 and 0.24, and 15m/5m tripped the kill
+  switch. Measured Nov 2026: the median 1-second BTC move is 0.005% against a
+  0.20% round-trip taker fee, and a REST order takes about 220 ms from a home
+  connection. High-frequency trading is therefore not viable on this setup.
+- A pullback-in-uptrend entry (EMA 20 > 50 > 200, close between EMA 20 and 50,
+  RSI ≤ 50) was defined once and tested once on Jan 2020 – Nov 2026. It cut the
+  profit factor from 1.56 to 1.04 and tripped the kill switch, so it was not
+  adopted.
+- A Bitcoin regime filter (buy only while BTC's EMA 50 is above its EMA 200),
+  tested once at 0.5% risk, did not help: +113.0% vs +111.4% on the default
+  coins (better in 2022, worse in 2026), and worse on a broader 11-coin set
+  (+15.9% vs +22.4%, kill switch in both). Not adopted.
+- Short selling (1x, as on perpetual futures) with rules mirroring the long
+  side was tested once at 0.5% risk with a conservative funding cost. It
+  lost money (129 shorts, profit factor 0.91), lost even in the 2022 crash
+  year, and tripped the 20% kill switch in 2022, so the bot missed 2023–2025:
+  +28.6% vs +111.4% for long-only. Tripling the funding cost changed little.
+  Not adopted.
+- Doubling risk to 0.5% with the 10% kill switch tripped it in 2022, ending
+  with less than the default. Scaling the daily pause and kill switch with the
+  risk keeps the same 460 trades and scales returns almost linearly
+  (Jan 2020 – Nov 2026):
+
+  | Risk per trade | Daily pause / kill switch | Per year | Max drawdown | Worst year |
+  |---|---|---|---|---|
+  | 0.25% | 2% / 10% | ~5.8% | 8.1% | −4.3% |
+  | 0.5% | 4% / 20% | ~11.6% | 15.6% | −8.4% |
+  | 0.75% | 6% / 30% | ~17.3% | 22.6% | −12.5% |
+  | 1.0% | 8% / 40% | ~22.0% | 27.3% | −15.5% |
+
+  The testnet and mainnet configs use 0.5% / 4% / 20%. Future drawdowns
+  should be expected to exceed the backtest maximum.
 - The strategy does not beat buy-and-hold in bull markets. Its value is bounded
   drawdowns and staying mostly in cash during downtrends. The Nov 2025 – Nov
   2026 period has been inspected, so further tuning needs new data or
@@ -189,6 +266,7 @@ stops keep positions protected.
 |---|---|
 | `config/config.json` | Paper mode (default). |
 | `config/testnet.json` | Testnet mode: `mode: "testnet"`, `live_order_submission_enabled: true`, and the `live` section. |
+| `config/mainnet.json` | Real-money mode: `mode: "mainnet"`, mainnet order endpoint, its own ledger and log. Ships with `real_money_acknowledged: false`, so it will not start until you change that. |
 
 Optional sections and keys default to backward-compatible values:
 `signals.require_bullish_trend_for_buy`, `require_breakout_for_buy`,
@@ -213,8 +291,8 @@ Run from the repository root; the config path defaults to `config/config.json`.
 |---|---|
 | `--paper [config]` / `--paper-once [config]` | Run the trader continuously / once against the simulated venue. |
 | `--paper-status`, `--paper-flatten`, `--paper-reset [config]` | Show the ledger; sell everything and halt; resume after a halt if limits allow. |
-| `--live [config]` / `--live-once [config]` | Same, against Binance Spot Testnet (testnet config and API keys required). |
-| `--live-status`, `--live-flatten`, `--live-reset [config]` | Testnet equivalents. |
+| `--live [config]` / `--live-once [config]` | Same, against Binance Spot Testnet or, with `config/mainnet.json`, mainnet (matching API keys required). |
+| `--live-status`, `--live-flatten`, `--live-reset [config]` | Testnet/mainnet equivalents. |
 | `--backtest-all [config]` | Shared-account portfolio backtest of every configured pair. |
 | `--backtest SYMBOL [config]` | Single-pair backtest with the trade list. |
 | `--scan-once` / `--scan [config]` | Detailed research output without trading. |
@@ -242,12 +320,16 @@ Binance's documented vector, ML evaluation, and the dry-run executor.
 
 ## Known limitations
 
-- Order execution is testnet-only; mainnet order submission is rejected by
-  configuration validation.
-- Commissions paid in BNB are not deducted from the bot ledger.
-- A crash between a buy fill and the following state write (milliseconds) would
-  leave an untracked exchange position; check the testnet account after any
-  crash during an entry.
+- The mainnet path shares all of its order logic with testnet, but it has not
+  yet been run against mainnet. Rehearse on testnet with the same sizing
+  first.
+- Binance's 5 USDT minimum order size is not modeled by the backtester. Small
+  allocations (below about 150 USDT at 0.25% risk, about 80 USDT at 0.5%) skip many signals that the
+  backtest would have taken.
+- After an unknown buy outcome is reconciled, new entries stay halted until
+  `--live-reset`, so that a person checks the account first.
+- Paper market orders are not retained by the simulated venue, so a paper
+  entry lost to a crash is treated as never placed.
 - Paper stops trigger only when a cycle observes the bid below the stop, so
   paper fills are checked at the scan cadence rather than tick by tick.
 - Backtests use OHLCV bars: trailing stops ratchet on closed-bar closes and

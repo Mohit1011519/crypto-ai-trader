@@ -156,7 +156,8 @@ LiveTrader::LiveTrader(common::LiveSettings live_settings,
             .next_client_sequence = 1,
             .positions = {},
             .executions = {},
-            .last_entry_candle_ms = {}
+            .last_entry_candle_ms = {},
+            .pending_entry = std::nullopt
         };
         persist();
     }
@@ -412,33 +413,95 @@ void LiveTrader::open_position(const market::ScanResult& result,
         return;
     }
 
+    const auto candle_ms = result.signal ? result.signal->metadata.timestamp_ms : 0;
     const auto client_order_id = next_client_order_id();
+    // Journal the order before sending it. If its result never makes it into
+    // the ledger (timeout, crash), the next cycle finds it by client order id.
+    state_.pending_entry = PendingEntry{
+        .symbol = result.symbol,
+        .client_order_id = client_order_id,
+        .atr = atr,
+        .candle_ms = candle_ms,
+        .created_at_ms = timestamp_ms
+    };
+    persist();
     execution::VenueOrder order{};
     try {
         order = venue_.market_order(result.symbol, risk::OrderSide::buy, quantity, client_order_id);
     } catch (const exchange::BinanceApiError& error) {
+        if (error.code() == execution::order_does_not_exist_code) {
+            // A lost response was followed by a lookup that found nothing.
+            // Keep the journal entry and confirm on the next cycle.
+            spdlog::warn("{} buy not found after a lost response ({}); re-checking next cycle",
+                         result.symbol, error.what());
+            return;
+        }
+        state_.pending_entry.reset();
+        persist();
         spdlog::warn("{} buy rejected: {}", result.symbol, error.what());
         return;
     } catch (const exchange::BinanceUnknownOutcome& error) {
         state_.trading_halted = true;
         persist();
-        spdlog::critical("{} buy outcome unknown ({}); trading halted until the account is "
-                         "checked manually", result.symbol, error.what());
+        spdlog::critical("{} buy outcome unknown ({}); new entries halted. The order is looked "
+                         "up every cycle and protected by a stop if it filled",
+                         result.symbol, error.what());
+        return;
+    }
+    record_entry(result.symbol, order, atr, candle_ms, timestamp_ms,
+                 "risk-approved trend breakout", executions);
+}
+
+void LiveTrader::record_entry(const std::string& symbol,
+                              const execution::VenueOrder& order,
+                              const double atr,
+                              const std::int64_t candle_ms,
+                              const std::int64_t timestamp_ms,
+                              const std::string& reason,
+                              std::vector<LiveExecution>& executions) {
+    if (std::any_of(state_.positions.begin(), state_.positions.end(),
+                    [&](const LivePosition& position) { return position.symbol == symbol; })) {
+        spdlog::critical("Entry order {} for {} filled but the ledger already holds {}; "
+                         "trading halted for a manual check", order.order_id, symbol, symbol);
+        state_.pending_entry.reset();
+        state_.trading_halted = true;
+        persist();
         return;
     }
     if (order.executed_quantity <= 0.0) {
+        state_.pending_entry.reset();
+        persist();
         return;
     }
 
+    const auto rules = venue_.symbol_rules(symbol);
     const double fill_price = order.quote_quantity / order.executed_quantity;
-    const double held = execution::floor_to_increment(
+    double held = execution::floor_to_increment(
         order.executed_quantity - order.base_commission, rules.step_size);
+    // If the fee lookup failed the base commission is unknown; never book (and
+    // later place a stop for) more than the account actually holds.
+    held = std::min(held, execution::floor_to_increment(
+        venue_.balance(rules.base_asset).free, rules.step_size));
     const double fee = order.quote_commission + order.base_commission * fill_price;
     const double cost = order.quote_quantity + order.quote_commission;
-    state_.cash_balance = std::max(0.0, state_.cash_balance - cost);
     const double stop_price = fill_price - risk_settings_.stop_atr_multiple * atr;
+
+    state_.pending_entry.reset();
+    state_.cash_balance = std::max(0.0, state_.cash_balance - cost);
+    if (candle_ms > 0) {
+        auto& last = state_.last_entry_candle_ms[symbol];
+        last = std::max(last, candle_ms);
+    }
+    if (!finite_positive(held) || !finite_positive(fill_price)) {
+        spdlog::critical("Entry order {} for {} filled but no sellable {} balance is visible; "
+                         "trading halted for a manual check", order.order_id, symbol,
+                         rules.base_asset);
+        state_.trading_halted = true;
+        persist();
+        return;
+    }
     state_.positions.push_back({
-        .symbol = result.symbol,
+        .symbol = symbol,
         .base_asset = rules.base_asset,
         .quantity = held,
         .entry_price = fill_price,
@@ -454,9 +517,9 @@ void LiveTrader::open_position(const market::ScanResult& result,
     });
     record({
         .id = 0,
-        .symbol = result.symbol,
+        .symbol = symbol,
         .side = "BUY",
-        .reason = "risk-approved trend breakout",
+        .reason = reason,
         .quantity = held,
         .price = fill_price,
         .fee = fee,
@@ -465,7 +528,8 @@ void LiveTrader::open_position(const market::ScanResult& result,
         .timestamp_ms = timestamp_ms
     }, executions);
     persist();
-    spdlog::info("BUY {} qty={} price={} stop={}", result.symbol, held, fill_price, stop_price);
+    spdlog::info("BUY {} qty={} price={} stop={} ({})", symbol, held, fill_price, stop_price,
+                 reason);
 
     if (!protect_position(state_.positions.back())) {
         // Never hold an unprotected position: exit immediately and stop trading.
@@ -473,6 +537,48 @@ void LiveTrader::open_position(const market::ScanResult& result,
                           timestamp_ms, executions);
         state_.trading_halted = true;
         persist();
+    }
+}
+
+bool LiveTrader::resolve_pending_entry(const std::int64_t timestamp_ms,
+                                       std::vector<LiveExecution>& executions) {
+    if (!state_.pending_entry) {
+        return true;
+    }
+    const auto pending = *state_.pending_entry;
+    try {
+        execution::VenueOrder order{};
+        try {
+            order = venue_.query_order_by_client_id(pending.symbol, pending.client_order_id);
+        } catch (const exchange::BinanceApiError& error) {
+            if (error.code() != execution::order_does_not_exist_code) {
+                throw;
+            }
+            spdlog::warn("Entry order {} for {} was never placed; clearing it",
+                         pending.client_order_id, pending.symbol);
+            state_.pending_entry.reset();
+            persist();
+            return true;
+        }
+        if (order.state == execution::OrderState::open) {
+            spdlog::warn("Entry order {} for {} is still open; checking again next cycle",
+                         pending.client_order_id, pending.symbol);
+            return false;
+        }
+        if (order.executed_quantity > 0.0) {
+            spdlog::critical("Recovered {} entry order {} that was missing from the ledger "
+                             "(qty {}); protecting it now", pending.symbol, order.order_id,
+                             order.executed_quantity);
+        }
+        record_entry(pending.symbol, order, pending.atr, pending.candle_ms, timestamp_ms,
+                     "recovered entry", executions);
+        return true;
+    } catch (const std::exception& error) {
+        // No new entries until this is settled; existing positions are still
+        // managed and their exchange stops stay in place.
+        spdlog::error("Could not resolve entry order {} for {}: {}", pending.client_order_id,
+                      pending.symbol, error.what());
+        return false;
     }
 }
 
@@ -503,6 +609,7 @@ std::vector<LiveExecution> LiveTrader::process_scan(
     };
 
     std::vector<LiveExecution> executions;
+    (void)resolve_pending_entry(timestamp_ms, executions);
     for (std::size_t index = 0; index < state_.positions.size();) {
         if (!manage_position(index, result_for(state_.positions[index].symbol),
                              timestamp_ms, executions)) {
@@ -531,7 +638,7 @@ std::vector<LiveExecution> LiveTrader::process_scan(
     }
 
     for (const auto& result : results) {
-        if (state_.trading_halted) {
+        if (state_.trading_halted || state_.pending_entry) {
             break;
         }
         if (!result.signal || result.signal->action != ai::Signal::buy ||
@@ -551,14 +658,8 @@ std::vector<LiveExecution> LiveTrader::process_scan(
         if (previous != state_.last_entry_candle_ms.end() && candle_ms <= previous->second) {
             continue;
         }
-        const auto positions_before = state_.positions.size();
+        // record_entry marks the candle as used once an entry fills.
         open_position(result, risk_manager, timestamp_ms, executions);
-        if (state_.positions.size() > positions_before ||
-            (!executions.empty() && executions.back().symbol == result.symbol &&
-             executions.back().timestamp_ms == timestamp_ms)) {
-            state_.last_entry_candle_ms[result.symbol] = candle_ms;
-            persist();
-        }
     }
 
     state_.peak_equity = std::max(state_.peak_equity, equity_unlocked());
@@ -569,6 +670,8 @@ std::vector<LiveExecution> LiveTrader::process_scan(
 std::vector<LiveExecution> LiveTrader::flatten_unlocked(const std::string& reason,
                                                         const std::int64_t timestamp_ms) {
     std::vector<LiveExecution> executions;
+    // A recovered entry is booked first so that it is sold as well.
+    (void)resolve_pending_entry(timestamp_ms, executions);
     for (std::size_t index = 0; index < state_.positions.size();) {
         if (!market_exit(index, reason, timestamp_ms, executions)) {
             ++index;
@@ -608,7 +711,8 @@ LiveAccountView LiveTrader::view() const {
         .daily_net_pnl = equity - state_.daily_starting_equity,
         .peak_equity = std::max(state_.peak_equity, equity),
         .trading_halted = state_.trading_halted,
-        .positions = state_.positions
+        .positions = state_.positions,
+        .pending_entry = state_.pending_entry
     };
 }
 
@@ -630,7 +734,16 @@ json LiveTrader::serialize() const {
         {"next_client_sequence", state_.next_client_sequence},
         {"positions", state_.positions},
         {"executions", state_.executions},
-        {"last_entry_candle_ms", state_.last_entry_candle_ms}
+        {"last_entry_candle_ms", state_.last_entry_candle_ms},
+        {"pending_entry", state_.pending_entry
+            ? json{
+                {"symbol", state_.pending_entry->symbol},
+                {"client_order_id", state_.pending_entry->client_order_id},
+                {"atr", state_.pending_entry->atr},
+                {"candle_ms", state_.pending_entry->candle_ms},
+                {"created_at_ms", state_.pending_entry->created_at_ms}
+              }
+            : json(nullptr)}
     };
 }
 
@@ -650,8 +763,24 @@ void LiveTrader::load(const json& input) {
         .positions = input.at("positions").get<std::vector<LivePosition>>(),
         .executions = input.at("executions").get<std::vector<LiveExecution>>(),
         .last_entry_candle_ms = input.value(
-            "last_entry_candle_ms", std::map<std::string, std::int64_t>{})
+            "last_entry_candle_ms", std::map<std::string, std::int64_t>{}),
+        .pending_entry = std::nullopt
     };
+    if (const auto found = input.find("pending_entry");
+        found != input.end() && !found->is_null()) {
+        state.pending_entry = PendingEntry{
+            .symbol = found->at("symbol").get<std::string>(),
+            .client_order_id = found->at("client_order_id").get<std::string>(),
+            .atr = found->at("atr").get<double>(),
+            .candle_ms = found->at("candle_ms").get<std::int64_t>(),
+            .created_at_ms = found->at("created_at_ms").get<std::int64_t>()
+        };
+        if (state.pending_entry->symbol.empty() ||
+            state.pending_entry->client_order_id.empty() ||
+            !finite_positive(state.pending_entry->atr)) {
+            throw std::invalid_argument("Persisted live state contains an invalid pending entry");
+        }
+    }
     if (!std::isfinite(state.cash_balance) || state.cash_balance < 0.0 ||
         !finite_positive(state.capital_allocation) ||
         !finite_positive(state.daily_starting_equity) ||

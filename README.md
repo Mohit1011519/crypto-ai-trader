@@ -3,8 +3,9 @@
 Automated C++20 trend-following bot for Binance spot. It buys breakouts in
 established uptrends, protects every position with a stop-loss order resting on
 the exchange, and trails that stop to lock in profit. It runs in **paper mode**
-(simulated fills on live prices) or on **Binance Spot Testnet** (real orders,
-no real money). Mainnet order submission is not enabled.
+(simulated fills on live prices), on **Binance Spot Testnet** (real orders, no
+real money), or on **Binance mainnet with real money** once a separate config
+explicitly acknowledges it.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the design, capital-protection
 layers, strategy rules, and backtest evidence.
@@ -18,6 +19,11 @@ per trade:
 | 3-year return | Buy-and-hold | Max drawdown | Bear year (Nov 2025 – Nov 2026) |
 |---|---|---|---|
 | +17.7% | +98% | 8.1% | −4.3% (buy-and-hold −34.5%) |
+
+On Jan 2020 – Nov 2026, which includes about four years the settings were
+never tuned on, the unchanged strategy returned +47% with an 8.1% maximum
+drawdown (2022 crash year: −3.9%). Faster timeframes, a pullback entry, and
+doubled risk all did worse; see ARCHITECTURE.md.
 
 The bot does not beat buy-and-hold in bull markets; it limits drawdowns and
 stays mostly in cash during downtrends. Backtests are not forecasts.
@@ -64,8 +70,8 @@ The first build downloads nlohmann/json 3.11.3, spdlog 1.14.1, and GoogleTest
    ```
 
 3. Review `config/testnet.json`, especially `live.capital_allocation` (capital
-   the bot may use, 100 USDT) and `live.maximum_order_notional` (largest single
-   buy, 50 USDT).
+   the bot may use, 250 USDT) and `live.maximum_order_notional` (largest single
+   buy, 100 USDT).
 4. Run:
 
    ```bash
@@ -74,7 +80,63 @@ The first build downloads nlohmann/json 3.11.3, spdlog 1.14.1, and GoogleTest
    ./build-linux/crypto-ai-trader --live-status config/testnet.json
    ./build-linux/crypto-ai-trader --live-flatten config/testnet.json   # emergency: sell all, halt
    ./build-linux/crypto-ai-trader --live-reset config/testnet.json     # resume after a halt
+   ./build-linux/crypto-ai-trader --live-selftest config/testnet.json  # order round-trip check
    ```
+
+### Mainnet (real money)
+
+Real-money trading uses `config/mainnet.json`, its own ledger
+(`data/mainnet_portfolio.json`), its own log (`logs/mainnet.log`), and its own
+keys. The shipped file refuses to start until you set
+`live.real_money_acknowledged` to `true`.
+
+Go-live checklist:
+
+1. **Rehearse on testnet first** with the same sizing (`config/testnet.json`
+   now uses the same 250 USDT allocation). Start with
+   `--live-selftest config/testnet.json`: it runs one minimum-size round trip
+   (buy, lookup by client order id, resting stop, stop replacement, cancel,
+   sell) outside the bot ledger and cleans up after itself. Testnet charges no
+   fees, so fee handling is only exercised on mainnet. Run it 24/7 for at least a week and
+   confirm that buys get a resting stop, stops ratchet, exits fill, and
+   `--live-flatten` works.
+2. **Fund a dedicated account.** Ideally use a Binance sub-account that holds
+   only the money the bot may lose. The bot trades only its ledger, but a
+   separate account also caps the damage from a bug.
+3. **Create a restricted API key.** Enable *Reading* and *Spot & Margin
+   Trading* only. Never enable withdrawals, and restrict the key to this
+   machine's IP. Before every mainnet session the bot checks the key and
+   refuses to trade if it can withdraw or cannot trade spot. It warns if the
+   key has no IP restriction or has permissions it does not need.
+4. **Size it deliberately.** `config/testnet.json` and `config/mainnet.json`
+   risk 0.5% per trade, with a 4% daily pause and a 20% drawdown kill switch.
+   In the 2020–2026 backtest that level made about 11.6% a year, with a 15.6%
+   worst drop and a −8.4% worst year. Expect future drops to exceed the
+   backtest's. At the current 4h volatility (ATR 2–3%) each entry is about 9%
+   of the allocation. Binance rejects orders under 5 USDT, so allocations
+   below about 80 USDT skip most signals. At 250 USDT each trade risks about
+   1.25 USDT, entries are about 24 USDT, and the kill switch trips at about
+   50 USDT lost.
+5. **Export keys and acknowledge.** Keys are read from the environment only:
+
+   ```bash
+   export BINANCE_API_KEY=...
+   export BINANCE_API_SECRET=...
+   # edit config/mainnet.json: "real_money_acknowledged": true
+   ./build-linux/crypto-ai-trader --live-selftest config/mainnet.json  # ~8 USDT round trip, ~0.02 USDT fees
+   ./build-linux/crypto-ai-trader --live-once config/mainnet.json   # one cycle
+   ./build-linux/crypto-ai-trader --live config/mainnet.json        # keep running
+   ./build-linux/crypto-ai-trader --live-status config/mainnet.json
+   ./build-linux/crypto-ai-trader --live-flatten config/mainnet.json  # emergency
+   ```
+
+6. **Run it unattended** with `deploy/crypto-ai-trader-mainnet.service` and
+   `~/.config/crypto-ai-trader/mainnet.env` (same steps as "Run 24/7" below),
+   with Telegram alerts set up.
+
+If the bot reports an *unconfirmed entry* or halts after an unknown order
+outcome, it keeps looking the order up every cycle and protects it with a stop
+if it filled. Check the account on Binance before running `--live-reset`.
 
 ### What you will see
 
@@ -101,6 +163,26 @@ tail -f logs/testnet.log
 
 Testnet orders appear on the testnet website under open orders and trade
 history.
+
+### Dashboard
+
+A read-only web page shows what the bot is worth, profit and loss, the daily
+and drawdown limits, an equity chart, profit per trade, open positions, the
+latest market check, and recent warnings or errors. It never places or
+changes orders, and it needs only Python 3 (no packages):
+
+```bash
+python3 scripts/dashboard.py                    # http://127.0.0.1:8765 (this computer only)
+bash deploy/install-dashboard.sh                # run it 24/7 as a user service
+bash deploy/install-dashboard.sh --lan          # also reachable from your phone on the same Wi-Fi
+python3 scripts/profit_report.py                # the same numbers in the terminal
+```
+
+With `--lan`, the page requires a secret token (saved in
+`~/.config/crypto-ai-trader/dashboard.token`); open the printed link. Anyone
+with the link can see your balances. The equity chart fills in while the
+dashboard runs: one point every 15 minutes and after every trade, stored next
+to the ledger as `*.equity.csv`.
 
 ### Phone alerts (optional)
 
@@ -159,14 +241,15 @@ and target, and charge `backtest.spread_fraction` on every fill.
 | Setting | Default | Meaning |
 |---|---|---|
 | `candle_interval` | `4h` | Signal timeframe. |
-| `risk.risk_per_trade_fraction` | 0.0025 | Equity risked between entry and initial stop. 0.005 roughly doubles both profit and drawdown. |
+| `risk.risk_per_trade_fraction` | 0.0025 | Equity risked between entry and initial stop. The testnet and mainnet configs use 0.005 (with a 4% daily pause and a 20% kill switch), which roughly doubles both profit and drawdown. |
 | `risk.maximum_open_positions` | 3 | Concurrent positions. |
 | `risk.daily_maximum_loss_fraction` | 0.02 | Daily loss that pauses new entries until the next UTC day. |
 | `risk.maximum_drawdown_fraction` | 0.10 | Drawdown that halts trading and sells everything. |
 | `risk.stop_atr_multiple` / `trailing_stop_atr_multiple` / `target_atr_multiple` | 2 / 4 / 10 | Initial stop, trailing distance, take-profit in ATRs. |
 | `risk.breakeven_trigger_r` | 1.5 | Profit, in multiples of initial risk, that moves the stop to break-even. |
-| `live.capital_allocation` | 100 | Capital the testnet bot manages. Applies when its state file is first created. |
-| `live.maximum_order_notional` | 50 | Largest single entry. |
+| `live.capital_allocation` | 250 | Capital the testnet/mainnet bot manages. Applies when its state file is first created. |
+| `live.maximum_order_notional` | 100 | Largest single entry. |
+| `live.real_money_acknowledged` | false | Must be `true` for mode `mainnet`; ignored otherwise. |
 | `paper_initial_balance` | 100 | Paper capital. |
 
 Invalid or inconsistent settings and corrupted state files are rejected instead

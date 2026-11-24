@@ -241,3 +241,51 @@ TEST(ConfigTests, TestnetModeRequiresExplicitOptInAndTestnetOrderEndpoint) {
     wrong_quote["trading_pairs"] = {"ETHBTC"};
     EXPECT_THROW(crypto_trader::common::parse_config(wrong_quote), std::invalid_argument);
 }
+
+TEST(ConfigTests, MainnetRequiresAcknowledgementMainnetEndpointAndItsOwnLedger) {
+    auto mainnet = valid_config();
+    mainnet["mode"] = "mainnet";
+    mainnet["live_order_submission_enabled"] = true;
+    mainnet["live"] = {
+        {"order_base_url", "https://api.binance.com"},
+        {"state_path", "data/mainnet_portfolio.json"},
+        {"capital_allocation", 250.0},
+        {"maximum_order_notional", 100.0},
+        {"real_money_acknowledged", true}
+    };
+    const auto config = crypto_trader::common::parse_config(mainnet);
+    EXPECT_EQ(config.mode, "mainnet");
+    EXPECT_TRUE(config.live.real_money_acknowledged);
+    EXPECT_EQ(config.live.order_base_url, "https://api.binance.com");
+
+    auto not_acknowledged = mainnet;
+    not_acknowledged["live"]["real_money_acknowledged"] = false;
+    EXPECT_THROW(crypto_trader::common::parse_config(not_acknowledged), std::invalid_argument);
+
+    auto acknowledgement_missing = mainnet;
+    acknowledgement_missing["live"].erase("real_money_acknowledged");
+    EXPECT_THROW(crypto_trader::common::parse_config(acknowledgement_missing),
+                 std::invalid_argument);
+
+    auto testnet_endpoint = mainnet;
+    testnet_endpoint["live"]["order_base_url"] = "https://testnet.binance.vision";
+    EXPECT_THROW(crypto_trader::common::parse_config(testnet_endpoint), std::invalid_argument);
+
+    auto shared_ledger = mainnet;
+    shared_ledger["live"].erase("state_path");
+    EXPECT_THROW(crypto_trader::common::parse_config(shared_ledger), std::invalid_argument);
+
+    auto submission_off = mainnet;
+    submission_off["live_order_submission_enabled"] = false;
+    EXPECT_THROW(crypto_trader::common::parse_config(submission_off), std::invalid_argument);
+
+    auto wrong_quote = mainnet;
+    wrong_quote["trading_pairs"] = {"ETHBTC"};
+    EXPECT_THROW(crypto_trader::common::parse_config(wrong_quote), std::invalid_argument);
+
+    // The acknowledgement alone never turns a paper or testnet config into mainnet.
+    auto paper_with_ack = valid_config();
+    paper_with_ack["live"] = {{"order_base_url", "https://api.binance.com"},
+                              {"real_money_acknowledged", true}};
+    EXPECT_THROW(crypto_trader::common::parse_config(paper_with_ack), std::invalid_argument);
+}

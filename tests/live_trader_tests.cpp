@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <stdexcept>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -26,6 +28,9 @@ public:
     double base_locked = 0.0;
     double quote_free = 10000.0;
     bool reject_stops = false;
+    // Failure injection for the next buy.
+    enum class BuyFailure { none, lost_response, never_placed, crash_after_fill, hidden_fee };
+    BuyFailure next_buy_failure = BuyFailure::none;
     int stops_placed = 0;
     int cancels = 0;
     std::map<std::int64_t, VenueOrder> orders;
@@ -51,12 +56,28 @@ public:
     }
     VenueOrder market_order(const std::string&, const crypto_trader::risk::OrderSide side,
                             const double quantity, const std::string& client_id) override {
+        const auto failure = side == crypto_trader::risk::OrderSide::buy
+            ? std::exchange(next_buy_failure, BuyFailure::none) : BuyFailure::none;
+        if (failure == BuyFailure::never_placed) {
+            throw crypto_trader::exchange::BinanceUnknownOutcome("timeout before the exchange");
+        }
         VenueOrder order{next_id_++, client_id, OrderState::filled, quantity, 0.0, 0.0, 0.0};
         if (side == crypto_trader::risk::OrderSide::buy) {
             order.quote_quantity = quantity * ask;
             order.base_commission = quantity * 0.001;
             quote_free -= order.quote_quantity;
             base_free += quantity - order.base_commission;
+            orders[order.order_id] = order;
+            if (failure == BuyFailure::lost_response) {
+                throw crypto_trader::exchange::BinanceUnknownOutcome("response lost after fill");
+            }
+            if (failure == BuyFailure::crash_after_fill) {
+                throw std::runtime_error("process died after the fill");
+            }
+            if (failure == BuyFailure::hidden_fee) {
+                order.base_commission = 0.0;  // fee lookup failed
+            }
+            return order;
         } else {
             order.quote_quantity = quantity * bid;
             order.quote_commission = order.quote_quantity * 0.001;
@@ -84,6 +105,18 @@ public:
     VenueOrder query_order(const std::string&, const std::int64_t order_id) override {
         return orders.at(order_id);
     }
+    VenueOrder query_order_by_client_id(const std::string&,
+                                        const std::string& client_id) override {
+        ++client_id_lookups;
+        for (const auto& [id, order] : orders) {
+            if (order.client_order_id == client_id) {
+                return order;
+            }
+        }
+        throw crypto_trader::exchange::BinanceApiError(
+            400, crypto_trader::execution::order_does_not_exist_code, "Order does not exist.");
+    }
+    int client_id_lookups = 0;
     VenueOrder cancel_order(const std::string&, const std::int64_t order_id) override {
         auto& order = orders.at(order_id);
         if (order.state == OrderState::open) {
@@ -386,4 +419,141 @@ TEST(LiveTrader, DailyLossPausesNewEntriesUntilTheNextDayWithoutHalting) {
 
     later_candle.signal->metadata.timestamp_ms += 86'400'000;
     EXPECT_EQ(trader.process_scan({later_candle}, risk_manager, t0 + 86'520'000).size(), 1);
+}
+
+TEST(LiveTrader, LostBuyResponseIsRecoveredAndProtectedOnTheNextCycle) {
+    TemporaryState file;
+    FakeVenue venue;
+    venue.next_buy_failure = FakeVenue::BuyFailure::lost_response;
+    crypto_trader::risk::RiskManager risk_manager(risk_settings());
+    crypto_trader::live::LiveTrader trader(live_settings(file), risk_settings(), venue);
+
+    EXPECT_TRUE(trader.process_scan(
+        {scan(100.0, crypto_trader::ai::Signal::buy)}, risk_manager, t0).empty());
+    // The fill happened on the exchange but is not yet in the ledger.
+    EXPECT_TRUE(trader.view().positions.empty());
+    ASSERT_TRUE(trader.view().pending_entry.has_value());
+    EXPECT_TRUE(trader.view().trading_halted);
+
+    const auto recovered = trader.process_scan(
+        {scan(100.0, crypto_trader::ai::Signal::hold)}, risk_manager, t0 + 60'000);
+    ASSERT_EQ(recovered.size(), 1);
+    EXPECT_EQ(recovered.front().side, "BUY");
+    EXPECT_EQ(recovered.front().reason, "recovered entry");
+    ASSERT_EQ(trader.view().positions.size(), 1);
+    EXPECT_NE(trader.view().positions.front().stop_order_id, 0);
+    EXPECT_NEAR(trader.view().positions.front().initial_stop_loss_price,
+                trader.view().positions.front().entry_price - 4.0, 0.05);
+    EXPECT_FALSE(trader.view().pending_entry.has_value());
+    EXPECT_LT(trader.view().cash_balance, 1000.0);
+    // Still halted: an unknown outcome needs a human look before new entries.
+    EXPECT_TRUE(trader.view().trading_halted);
+}
+
+TEST(LiveTrader, CrashRightAfterABuyFillIsRecoveredAfterRestart) {
+    TemporaryState file;
+    FakeVenue venue;
+    crypto_trader::risk::RiskManager risk_manager(risk_settings());
+    {
+        venue.next_buy_failure = FakeVenue::BuyFailure::crash_after_fill;
+        crypto_trader::live::LiveTrader trader(live_settings(file), risk_settings(), venue);
+        EXPECT_THROW(trader.process_scan({scan(100.0, crypto_trader::ai::Signal::buy)},
+                                         risk_manager, t0),
+                     std::runtime_error);
+    }
+    crypto_trader::live::LiveTrader restarted(live_settings(file), risk_settings(), venue);
+    ASSERT_TRUE(restarted.view().pending_entry.has_value());
+
+    // The same candle's BUY is replayed: the recovered fill must not be doubled.
+    const auto executions = restarted.process_scan(
+        {scan(100.0, crypto_trader::ai::Signal::buy)}, risk_manager, t0 + 60'000);
+    ASSERT_EQ(executions.size(), 1);
+    EXPECT_EQ(executions.front().reason, "recovered entry");
+    ASSERT_EQ(restarted.view().positions.size(), 1);
+    EXPECT_NE(restarted.view().positions.front().stop_order_id, 0);
+    EXPECT_EQ(venue.stops_placed, 1);
+    EXPECT_FALSE(restarted.view().trading_halted);
+}
+
+TEST(LiveTrader, EntryThatNeverReachedTheExchangeIsClearedWithoutAPosition) {
+    TemporaryState file;
+    FakeVenue venue;
+    venue.next_buy_failure = FakeVenue::BuyFailure::never_placed;
+    crypto_trader::risk::RiskManager risk_manager(risk_settings());
+    crypto_trader::live::LiveTrader trader(live_settings(file), risk_settings(), venue);
+
+    trader.process_scan({scan(100.0, crypto_trader::ai::Signal::buy)}, risk_manager, t0);
+    ASSERT_TRUE(trader.view().pending_entry.has_value());
+
+    EXPECT_TRUE(trader.process_scan(
+        {scan(100.0, crypto_trader::ai::Signal::hold)}, risk_manager, t0 + 60'000).empty());
+    EXPECT_FALSE(trader.view().pending_entry.has_value());
+    EXPECT_TRUE(trader.view().positions.empty());
+    EXPECT_DOUBLE_EQ(trader.view().cash_balance, 1000.0);
+    EXPECT_EQ(venue.client_id_lookups, 1);
+}
+
+TEST(LiveTrader, UnknownFeeNeverBooksMoreThanTheAccountHolds) {
+    TemporaryState file;
+    FakeVenue venue;
+    venue.next_buy_failure = FakeVenue::BuyFailure::hidden_fee;
+    crypto_trader::risk::RiskManager risk_manager(risk_settings());
+    crypto_trader::live::LiveTrader trader(live_settings(file), risk_settings(), venue);
+
+    trader.process_scan({scan(100.0, crypto_trader::ai::Signal::buy)}, risk_manager, t0);
+    ASSERT_EQ(trader.view().positions.size(), 1);
+    const auto& position = trader.view().positions.front();
+    // The exchange kept a 0.1% base-asset fee the venue failed to report.
+    EXPECT_NE(position.stop_order_id, 0);
+    EXPECT_LE(position.quantity, venue.base_locked + 1e-12);
+    EXPECT_GE(venue.base_free, -1e-12);
+}
+
+TEST(LiveTrader, FlattenAlsoSellsARecoveredEntry) {
+    TemporaryState file;
+    FakeVenue venue;
+    venue.next_buy_failure = FakeVenue::BuyFailure::lost_response;
+    crypto_trader::risk::RiskManager risk_manager(risk_settings());
+    crypto_trader::live::LiveTrader trader(live_settings(file), risk_settings(), venue);
+    trader.process_scan({scan(100.0, crypto_trader::ai::Signal::buy)}, risk_manager, t0);
+    ASSERT_TRUE(trader.view().pending_entry.has_value());
+
+    const auto executions = trader.flatten("manual flatten", t0 + 60'000);
+    ASSERT_EQ(executions.size(), 2);
+    EXPECT_EQ(executions.front().side, "BUY");
+    EXPECT_EQ(executions.back().side, "SELL");
+    EXPECT_TRUE(trader.view().positions.empty());
+    EXPECT_FALSE(trader.view().pending_entry.has_value());
+    // Only sub-lot-step dust from the base-asset fee may remain.
+    EXPECT_LT(venue.base_free + venue.base_locked, 0.0001);
+}
+
+TEST(BinanceSignedClient, ApiKeyWithWithdrawalsOrNoTradingIsRejected) {
+    using crypto_trader::exchange::review_api_key_restrictions;
+    const nlohmann::json safe = {
+        {"ipRestrict", true}, {"enableReading", true}, {"enableWithdrawals", false},
+        {"enableInternalTransfer", false}, {"permitsUniversalTransfer", false},
+        {"enableMargin", false}, {"enableFutures", false},
+        {"enableSpotAndMarginTrading", true}
+    };
+    const auto ok = review_api_key_restrictions(safe);
+    EXPECT_TRUE(ok.blocking.empty());
+    EXPECT_TRUE(ok.warnings.empty());
+
+    auto withdrawals = safe;
+    withdrawals["enableWithdrawals"] = true;
+    EXPECT_EQ(review_api_key_restrictions(withdrawals).blocking.size(), 1);
+
+    auto no_trading = safe;
+    no_trading["enableSpotAndMarginTrading"] = false;
+    EXPECT_EQ(review_api_key_restrictions(no_trading).blocking.size(), 1);
+
+    auto unrestricted_ip = safe;
+    unrestricted_ip["ipRestrict"] = false;
+    const auto warned = review_api_key_restrictions(unrestricted_ip);
+    EXPECT_TRUE(warned.blocking.empty());
+    EXPECT_EQ(warned.warnings.size(), 1);
+
+    // An unexpected response must fail closed.
+    EXPECT_GE(review_api_key_restrictions(nlohmann::json::object()).blocking.size(), 2);
 }

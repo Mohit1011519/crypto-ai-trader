@@ -37,8 +37,22 @@ struct ApiCredentials {
     std::string api_secret;
 };
 
-// Reads BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET.
-ApiCredentials credentials_from_environment();
+// Reads BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET, or for mainnet
+// BINANCE_API_KEY / BINANCE_API_SECRET. Separate names keep a testnet key from
+// ever being sent to mainnet and vice versa.
+ApiCredentials credentials_from_environment(bool mainnet = false);
+
+struct ApiKeyReview {
+    // Any entry here means the bot must refuse to trade with the key.
+    std::vector<std::string> blocking;
+    std::vector<std::string> warnings;
+};
+
+// Reviews GET /sapi/v1/account/apiRestrictions. The bot only needs reading
+// and spot trading; a key that can withdraw would let anyone who obtains it
+// take the money, so it is rejected. A missing withdrawal or permission field
+// fails closed.
+ApiKeyReview review_api_key_restrictions(const nlohmann::json& restrictions);
 
 // Lower-case hex HMAC-SHA256 of `payload`, as required for SIGNED endpoints.
 std::string hmac_sha256_hex(const std::string& secret, const std::string& payload);

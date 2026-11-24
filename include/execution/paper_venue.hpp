@@ -35,6 +35,10 @@ public:
                                       double stop_price,
                                       const std::string& client_order_id) override;
     VenueOrder query_order(const std::string& symbol, std::int64_t order_id) override;
+    // Finds resting stops only: simulated market orders fill in-process and
+    // are not retained, so a lost paper entry is reported as never placed.
+    VenueOrder query_order_by_client_id(const std::string& symbol,
+                                        const std::string& client_order_id) override;
     VenueOrder cancel_order(const std::string& symbol, std::int64_t order_id) override;
 
 private:

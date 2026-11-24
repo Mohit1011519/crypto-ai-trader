@@ -12,7 +12,6 @@
 namespace crypto_trader::execution {
 namespace {
 
-constexpr int order_does_not_exist = -2013;
 constexpr int unknown_order_on_cancel = -2011;
 
 double number(const nlohmann::json& value) {
@@ -157,14 +156,16 @@ VenueOrder BinanceSpotVenue::place_order(const std::string& symbol,
                     "GET", "/api/v3/order",
                     {{"symbol", symbol}, {"origClientOrderId", client_order_id}}));
             } catch (const exchange::BinanceApiError& lookup) {
-                if (lookup.code() == order_does_not_exist) {
+                if (lookup.code() == order_does_not_exist_code) {
                     throw exchange::BinanceApiError(
                         lookup.http_status(), lookup.code(),
                         "order " + client_order_id + " was not placed");
                 }
-                throw;
-            } catch (const exchange::BinanceUnknownOutcome&) {
-                // Keep retrying the lookup.
+                // Any other lookup failure (clock skew, rate limit) says nothing
+                // about the order itself: keep retrying, never report "rejected".
+                spdlog::warn("Lookup of order {} failed: {}", client_order_id, lookup.what());
+            } catch (const std::exception& lookup) {
+                spdlog::warn("Lookup of order {} failed: {}", client_order_id, lookup.what());
             }
         }
         throw;
@@ -175,10 +176,32 @@ VenueOrder BinanceSpotVenue::with_commissions(const std::string& symbol, VenueOr
     if (order.executed_quantity <= 0.0) {
         return order;
     }
+    // The order has already executed: a failed fee lookup must never discard
+    // it. Fees then go unrecorded (logged), and the trader clamps the held
+    // quantity to the actual balance so the stop still covers the position.
     const auto rules = symbol_rules(symbol);
-    const auto trades = client_.signed_request(
-        "GET", "/api/v3/myTrades",
-        {{"symbol", symbol}, {"orderId", std::to_string(order.order_id)}});
+    nlohmann::json trades;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
+        }
+        try {
+            trades = client_.signed_request(
+                "GET", "/api/v3/myTrades",
+                {{"symbol", symbol}, {"orderId", std::to_string(order.order_id)}});
+            if (trades.is_array() && !trades.empty()) {
+                break;
+            }
+        } catch (const std::exception& error) {
+            spdlog::warn("Commission lookup for order {} failed: {}", order.order_id,
+                         error.what());
+        }
+    }
+    if (!trades.is_array() || trades.empty()) {
+        spdlog::error("Commissions for {} order {} could not be read; they are not recorded "
+                      "in the ledger", symbol, order.order_id);
+        return order;
+    }
     for (const auto& trade : trades) {
         const auto asset = trade.at("commissionAsset").get<std::string>();
         const double commission = number(trade.at("commission"));
@@ -186,6 +209,16 @@ VenueOrder BinanceSpotVenue::with_commissions(const std::string& symbol, VenueOr
             order.base_commission += commission;
         } else if (asset == rules.quote_asset) {
             order.quote_commission += commission;
+        } else if (commission > 0.0) {
+            // Typically BNB when "pay fees with BNB" is on. The fee comes out of
+            // a balance the bot does not manage, so charge its quote value to
+            // the ledger to keep profit and loss honest.
+            try {
+                order.quote_commission += commission * book_top(asset + rules.quote_asset).bid;
+            } catch (const std::exception& error) {
+                spdlog::warn("Could not value {} {} commission in {}: {}", commission, asset,
+                             rules.quote_asset, error.what());
+            }
         }
     }
     return order;
@@ -228,6 +261,13 @@ VenueOrder BinanceSpotVenue::query_order(const std::string& symbol,
                                          const std::int64_t order_id) {
     auto order = parse_order(client_.signed_request(
         "GET", "/api/v3/order", {{"symbol", symbol}, {"orderId", std::to_string(order_id)}}));
+    return order.state == OrderState::open ? order : with_commissions(symbol, order);
+}
+
+VenueOrder BinanceSpotVenue::query_order_by_client_id(const std::string& symbol,
+                                                      const std::string& client_order_id) {
+    auto order = parse_order(client_.signed_request(
+        "GET", "/api/v3/order", {{"symbol", symbol}, {"origClientOrderId", client_order_id}}));
     return order.state == OrderState::open ? order : with_commissions(symbol, order);
 }
 

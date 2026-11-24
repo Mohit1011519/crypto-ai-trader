@@ -64,15 +64,54 @@ BinanceApiError::BinanceApiError(const long http_status, const int code,
       http_status_(http_status),
       code_(code) {}
 
-ApiCredentials credentials_from_environment() {
-    const char* key = std::getenv("BINANCE_TESTNET_API_KEY");
-    const char* secret = std::getenv("BINANCE_TESTNET_API_SECRET");
+ApiCredentials credentials_from_environment(const bool mainnet) {
+    const char* key_name = mainnet ? "BINANCE_API_KEY" : "BINANCE_TESTNET_API_KEY";
+    const char* secret_name = mainnet ? "BINANCE_API_SECRET" : "BINANCE_TESTNET_API_SECRET";
+    const char* key = std::getenv(key_name);
+    const char* secret = std::getenv(secret_name);
     if (key == nullptr || secret == nullptr || *key == '\0' || *secret == '\0') {
         throw std::runtime_error(
-            "Set BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET "
-            "(create keys at https://testnet.binance.vision)");
+            std::string("Set ") + key_name + " and " + secret_name +
+            (mainnet ? " (Binance > API Management; enable Spot trading only, never withdrawals)"
+                     : " (create keys at https://testnet.binance.vision)"));
     }
     return {key, secret};
+}
+
+ApiKeyReview review_api_key_restrictions(const nlohmann::json& restrictions) {
+    ApiKeyReview review;
+    const auto flag = [&](const char* name, const bool missing_value) {
+        const auto found = restrictions.find(name);
+        return found != restrictions.end() && found->is_boolean() ? found->get<bool>()
+                                                                 : missing_value;
+    };
+    if (flag("enableWithdrawals", true)) {
+        review.blocking.emplace_back(
+            "withdrawals are enabled; create a key with withdrawals disabled");
+    }
+    if (!flag("enableSpotAndMarginTrading", false)) {
+        review.blocking.emplace_back("spot trading permission is not enabled");
+    }
+    if (!flag("enableReading", false)) {
+        review.blocking.emplace_back("read permission is not enabled");
+    }
+    if (!flag("ipRestrict", false)) {
+        review.warnings.emplace_back(
+            "key is not restricted to trusted IP addresses; restrict it to this "
+            "machine's public IP in Binance API Management");
+    }
+    if (flag("enableInternalTransfer", false) || flag("permitsUniversalTransfer", false)) {
+        review.warnings.emplace_back(
+            "key can transfer funds between your Binance accounts; the bot never needs "
+            "this, so disable it");
+    }
+    if (flag("enableMargin", false) || flag("enableFutures", false) ||
+        flag("enableVanillaOptions", false) || flag("enablePortfolioMarginTrading", false)) {
+        review.warnings.emplace_back(
+            "key has margin, futures, or options permissions the bot does not use; "
+            "disable them");
+    }
+    return review;
 }
 
 std::string hmac_sha256_hex(const std::string& secret, const std::string& payload) {

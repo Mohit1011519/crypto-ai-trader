@@ -16,9 +16,12 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <csignal>
+#include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <cmath>
 #include <optional>
@@ -53,11 +56,12 @@ void print_usage() {
               << "  crypto-ai-trader --backtest-all [config-path]\n"
               << "  crypto-ai-trader --ml-evaluate SYMBOL [config-path]\n"
               << "  crypto-ai-trader --execution-status [config-path]\n"
-              << "  crypto-ai-trader --live-once [config-path]      (testnet orders)\n"
-              << "  crypto-ai-trader --live [config-path]           (testnet orders)\n"
+              << "  crypto-ai-trader --live-once [config-path]      (testnet or mainnet orders)\n"
+              << "  crypto-ai-trader --live [config-path]           (testnet or mainnet orders)\n"
               << "  crypto-ai-trader --live-status [config-path]\n"
               << "  crypto-ai-trader --live-flatten [config-path]   (sell all, halt)\n"
               << "  crypto-ai-trader --live-reset [config-path]\n"
+              << "  crypto-ai-trader --live-selftest [config-path] (one minimum-size order round trip)\n"
               << "  crypto-ai-trader --execution-dry-run SYMBOL buy|sell QUANTITY [config-path]\n"
               << "  crypto-ai-trader --help\n";
 }
@@ -350,6 +354,11 @@ void print_live_account(const char* label,
               << " DailyPnL=" << account.daily_net_pnl
               << " PeakEquity=" << account.peak_equity
               << " Trading=" << (account.trading_halted ? "HALTED" : "ENABLED") << '\n';
+    if (account.pending_entry) {
+        std::cout << "  Unconfirmed entry: " << account.pending_entry->symbol
+                  << " (client order " << account.pending_entry->client_order_id
+                  << "); it is looked up on the exchange every cycle\n";
+    }
     for (const auto& position : account.positions) {
         std::cout << "  " << position.symbol
                   << " Qty=" << std::setprecision(8) << position.quantity
@@ -373,13 +382,194 @@ void print_live_account(const char* label,
     }
 }
 
+// Refuses to trade real money unless the key and account are safe and usable.
+// Runs before every mainnet trading session (not before status, flatten or
+// reset, so an emergency exit is never blocked by it).
+void run_mainnet_preflight(crypto_trader::exchange::BinanceSignedClient& client,
+                           crypto_trader::execution::SpotVenue& venue,
+                           const crypto_trader::common::AppConfig& config,
+                           const crypto_trader::common::LiveSettings& settings) {
+    const auto review = crypto_trader::exchange::review_api_key_restrictions(
+        client.signed_request("GET", "/sapi/v1/account/apiRestrictions", {}));
+    for (const auto& warning : review.warnings) {
+        spdlog::warn("Mainnet API key: {}", warning);
+    }
+    if (!review.blocking.empty()) {
+        std::string reasons;
+        for (const auto& problem : review.blocking) {
+            reasons += (reasons.empty() ? "" : "; ") + problem;
+        }
+        throw std::runtime_error("Mainnet API key rejected: " + reasons);
+    }
+    const auto account = client.signed_request(
+        "GET", "/api/v3/account", {{"omitZeroBalances", "true"}});
+    if (!account.value("canTrade", false)) {
+        throw std::runtime_error("Binance reports this account cannot trade (canTrade=false)");
+    }
+    const auto quote = venue.balance(settings.quote_asset);
+    if (quote.free + 1e-9 < settings.capital_allocation) {
+        spdlog::warn("Free {} balance {:.2f} is below the {:.2f} allocation; entries are "
+                     "limited to the free balance", settings.quote_asset, quote.free,
+                     settings.capital_allocation);
+    }
+    for (const auto& pair : config.trading_pairs) {
+        const auto rules = venue.symbol_rules(pair);
+        if (!rules.stop_market_supported) {
+            spdlog::warn("{} does not support exchange STOP_LOSS orders and will not be traded",
+                         pair);
+        }
+    }
+    spdlog::warn("REAL MONEY: managing up to {:.2f} {} on Binance mainnet; largest entry "
+                 "{:.2f}; trading halts at {:.0f}% drawdown",
+                 settings.capital_allocation, settings.quote_asset,
+                 settings.maximum_order_notional, config.risk.maximum_drawdown_fraction * 100.0);
+}
+
+// Runs the order lifecycle the trader depends on once, at about 1.5x the
+// exchange minimum: market buy, lookup by client order id (crash recovery),
+// resting STOP_LOSS, stop replacement (trailing), cancel, market sell. These
+// orders are outside the bot ledger. On failure the stop is cancelled and
+// whatever was bought is sold.
+int run_order_selftest(crypto_trader::execution::SpotVenue& venue,
+                       const crypto_trader::common::AppConfig& config,
+                       const crypto_trader::common::LiveSettings& settings,
+                       const char* label) {
+    using crypto_trader::execution::OrderState;
+    using crypto_trader::execution::floor_to_increment;
+    using crypto_trader::risk::OrderSide;
+    const auto& symbol = config.trading_pairs.front();
+    const auto rules = venue.symbol_rules(symbol);
+    if (!rules.stop_market_supported) {
+        throw std::runtime_error(symbol + " does not support exchange STOP_LOSS orders");
+    }
+    const auto top = venue.book_top(symbol);
+    const double target_notional =
+        rules.minimum_notional > 0.0 ? rules.minimum_notional * 1.5 : 10.0;
+    if (target_notional > settings.maximum_order_notional) {
+        throw std::runtime_error("Self-test order exceeds live.maximum_order_notional");
+    }
+    if (venue.balance(settings.quote_asset).free < target_notional * 1.05) {
+        throw std::runtime_error("Not enough free " + settings.quote_asset + " for the self-test");
+    }
+    const double quantity = std::max(
+        rules.minimum_quantity,
+        std::ceil(target_notional / top.ask / rules.step_size - 1e-9) * rules.step_size);
+    const auto stamp = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+
+    std::cout << label << " order self-test on " << symbol << ": about " << std::fixed
+              << std::setprecision(2) << quantity * top.ask << ' ' << settings.quote_asset
+              << ", outside the bot ledger\n";
+    int step = 0;
+    const auto passed = [&](const std::string& message) {
+        std::cout << "  [" << ++step << "] OK  " << message << '\n';
+    };
+    double held = 0.0;
+    std::int64_t stop_id = 0;
+    try {
+        const std::string buy_id = "cat-st-" + stamp + "-b";
+        const auto buy = venue.market_order(symbol, OrderSide::buy, quantity, buy_id);
+        if (buy.executed_quantity <= 0.0) {
+            throw std::runtime_error("market buy did not fill");
+        }
+        held = floor_to_increment(buy.executed_quantity - buy.base_commission, rules.step_size);
+        const double buy_price = buy.quote_quantity / buy.executed_quantity;
+        std::ostringstream bought;
+        bought << std::setprecision(8) << "market BUY filled qty=" << buy.executed_quantity
+               << " avg=" << buy_price << " fee(base)=" << buy.base_commission
+               << " fee(quote)=" << buy.quote_commission;
+        passed(bought.str());
+
+        held = std::min(held, floor_to_increment(venue.balance(rules.base_asset).free,
+                                                 rules.step_size));
+        const auto found = venue.query_order_by_client_id(symbol, buy_id);
+        if (found.order_id != buy.order_id || found.state != OrderState::filled) {
+            throw std::runtime_error("lookup by client order id returned a different order");
+        }
+        passed("BUY found again by client order id (crash-recovery path)");
+
+        const double first_stop = top.bid * 0.90;
+        stop_id = venue.place_stop_market_sell(symbol, held, first_stop,
+                                               "cat-st-" + stamp + "-s1").order_id;
+        if (venue.query_order(symbol, stop_id).state != OrderState::open) {
+            throw std::runtime_error("STOP_LOSS order is not resting on the exchange");
+        }
+        std::ostringstream rested;
+        rested << std::fixed << std::setprecision(2) << "STOP_LOSS sell for " << std::setprecision(8) << held
+               << " resting at " << std::setprecision(2) << first_stop << " (order " << stop_id
+               << ")";
+        passed(rested.str());
+
+        if (venue.cancel_order(symbol, stop_id).state != OrderState::cancelled) {
+            throw std::runtime_error("stop cancel did not report CANCELED");
+        }
+        stop_id = 0;
+        const double raised_stop = top.bid * 0.92;
+        stop_id = venue.place_stop_market_sell(symbol, held, raised_stop,
+                                               "cat-st-" + stamp + "-s2").order_id;
+        std::ostringstream raised;
+        raised << std::fixed << std::setprecision(2) << "stop cancelled and re-placed higher at "
+               << raised_stop << " (trailing-stop path)";
+        passed(raised.str());
+
+        if (venue.cancel_order(symbol, stop_id).state != OrderState::cancelled) {
+            throw std::runtime_error("stop cancel did not report CANCELED");
+        }
+        stop_id = 0;
+        passed("stop cancelled; balance unlocked");
+
+        const auto sell = venue.market_order(symbol, OrderSide::sell, held,
+                                             "cat-st-" + stamp + "-x");
+        held = 0.0;
+        std::ostringstream sold;
+        sold << std::setprecision(8) << "market SELL filled qty=" << sell.executed_quantity
+             << " avg=" << (sell.executed_quantity > 0.0
+                                ? sell.quote_quantity / sell.executed_quantity : 0.0)
+             << " fee(quote)=" << sell.quote_commission;
+        passed(sold.str());
+
+        const double spent = buy.quote_quantity + buy.quote_commission;
+        const double received = sell.quote_quantity - sell.quote_commission;
+        std::cout << std::setprecision(4) << "Spent " << spent << ", received " << received
+                  << ' ' << settings.quote_asset << " (difference = fees, spread, and "
+                  << "sub-lot dust kept)\nSelf-test PASSED\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cout << "  FAILED: " << error.what() << '\n';
+        if (stop_id != 0) {
+            try {
+                (void)venue.cancel_order(symbol, stop_id);
+            } catch (const std::exception& cleanup) {
+                std::cout << "  cleanup: stop " << stop_id << " not cancelled: "
+                          << cleanup.what() << '\n';
+            }
+        }
+        if (held > 0.0) {
+            try {
+                const double sellable = floor_to_increment(
+                    std::min(held, venue.balance(rules.base_asset).free), rules.step_size);
+                if (sellable >= rules.minimum_quantity) {
+                    (void)venue.market_order(symbol, OrderSide::sell, sellable,
+                                             "cat-st-" + stamp + "-c");
+                    std::cout << "  cleanup: sold " << sellable << ' ' << rules.base_asset << '\n';
+                }
+            } catch (const std::exception& cleanup) {
+                std::cout << "  cleanup: sell failed: " << cleanup.what() << '\n';
+            }
+        }
+        std::cout << "Self-test FAILED; check open orders and balances on the exchange\n";
+        return 1;
+    }
+}
+
 int run_trader(const crypto_trader::common::AppConfig& config, const std::string& command) {
     const bool paper = command.rfind("--paper", 0) == 0;
     const std::string action = command.substr(paper ? 7 : 6);
-    if (!paper && config.mode != "testnet") {
+    const bool mainnet = !paper && config.mode == "mainnet";
+    if (!paper && config.mode != "testnet" && !mainnet) {
         throw std::invalid_argument(
-            "Live commands require mode 'testnet' and live_order_submission_enabled: true "
-            "(see config/testnet.json)");
+            "Live commands require mode 'testnet' (config/testnet.json) or 'mainnet' "
+            "(config/mainnet.json) with live_order_submission_enabled: true");
     }
 
     // Paper and testnet run the same LiveTrader; only the venue differs.
@@ -403,11 +593,18 @@ int run_trader(const crypto_trader::common::AppConfig& config, const std::string
             config.risk.taker_fee_rate, config.risk.slippage_rate);
     } else {
         client = std::make_unique<crypto_trader::exchange::BinanceSignedClient>(
-            settings.order_base_url, crypto_trader::exchange::credentials_from_environment(),
+            settings.order_base_url,
+            crypto_trader::exchange::credentials_from_environment(mainnet),
             config.request_timeout_seconds, settings.receive_window_ms);
         venue = std::make_unique<crypto_trader::execution::BinanceSpotVenue>(*client);
     }
-    const char* label = paper ? "Paper" : "Testnet";
+    if (action == "-selftest") {
+        if (mainnet) {
+            run_mainnet_preflight(*client, *venue, config, settings);
+        }
+        return run_order_selftest(*venue, config, settings, mainnet ? "MAINNET" : "Testnet");
+    }
+    const char* label = paper ? "Paper" : mainnet ? "MAINNET" : "Testnet";
     crypto_trader::risk::RiskManager risk_manager(config.risk);
     crypto_trader::live::LiveTrader trader(settings, config.risk, *venue);
 
@@ -427,6 +624,10 @@ int run_trader(const crypto_trader::common::AppConfig& config, const std::string
         print_live_account(label, trader.view(), {});
         std::cout << "Trading re-enabled.\n";
         return 0;
+    }
+
+    if (mainnet) {
+        run_mainnet_preflight(*client, *venue, config, settings);
     }
 
     // Signals always use real (mainnet) public market data.
@@ -571,6 +772,31 @@ int run_backtest_all(const crypto_trader::common::AppConfig& config) {
     for (const auto& year : result.yearly_returns) {
         std::cout << ' ' << year.year << '=' << year.return_fraction * 100.0 << '%';
     }
+    // Trades are attributed to the year they closed in.
+    std::map<int, std::pair<double, double>> profit_and_loss_by_year;
+    std::map<int, int> trades_by_year;
+    for (const auto& trade : result.trades) {
+        const std::time_t seconds = static_cast<std::time_t>(trade.closed_at_ms / 1000);
+        std::tm utc{};
+#ifdef _WIN32
+        gmtime_s(&utc, &seconds);
+#else
+        gmtime_r(&seconds, &utc);
+#endif
+        const int year = utc.tm_year + 1900;
+        auto& [profit, loss] = profit_and_loss_by_year[year];
+        (trade.net_pnl > 0.0 ? profit : loss) += std::abs(trade.net_pnl);
+        ++trades_by_year[year];
+    }
+    std::cout << "\nTrades/ProfitFactor by year:";
+    for (const auto& [year, totals] : profit_and_loss_by_year) {
+        std::cout << ' ' << year << '=' << trades_by_year[year] << '/';
+        if (totals.second > 0.0) {
+            std::cout << std::setprecision(2) << totals.first / totals.second;
+        } else {
+            std::cout << "n/a";
+        }
+    }
     std::cout << "\nNet P/L by pair:";
     for (const auto& symbol : config.trading_pairs) {
         double pnl = 0.0;
@@ -642,10 +868,15 @@ int show_execution_status(const crypto_trader::common::AppConfig& config) {
               << "Dry-run interface: available (simulated preview only)\n"
               << "Live order submission: "
               << (config.live_order_submission_enabled ? "ENABLED" : "DISABLED") << '\n'
-              << "Testnet order adapter: "
-              << (config.mode == "testnet" ? config.live.order_base_url : "inactive (paper mode)")
+              << "Order endpoint: "
+              << (config.mode == "paper" ? std::string("inactive (paper mode)")
+                                         : config.live.order_base_url)
               << '\n'
-              << "Mainnet order submission: not enabled; configuration rejects it\n";
+              << "Real money: "
+              << (config.mode == "mainnet"
+                      ? "YES (mainnet, acknowledged in live.real_money_acknowledged)"
+                      : "no")
+              << '\n';
     return 0;
 }
 
@@ -700,7 +931,8 @@ int main(int argc, char* argv[]) {
             command == "--paper-flatten" ||
             command == "--execution-status" || command == "--backtest-all" ||
             command == "--live-once" || command == "--live" || command == "--live-status" ||
-            command == "--live-flatten" || command == "--live-reset";
+            command == "--live-flatten" || command == "--live-reset" ||
+            command == "--live-selftest";
         const bool dry_run_command = command == "--execution-dry-run";
         if (scanner_command && (argc < 2 || argc > 3)) {
             print_usage();

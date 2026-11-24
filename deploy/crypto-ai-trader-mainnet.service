@@ -1,0 +1,31 @@
+# systemd user service for REAL-MONEY trading on Binance mainnet. Install only
+# after a clean testnet rehearsal (see README "Mainnet (real money)"):
+#   mkdir -p ~/.config/systemd/user ~/.config/crypto-ai-trader
+#   cp deploy/crypto-ai-trader-mainnet.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now crypto-ai-trader-mainnet
+#   loginctl enable-linger "$USER"   # keep running while logged out
+# Do not run this and the testnet service from the same config or state file.
+[Unit]
+Description=Crypto AI Trader (MAINNET, real money)
+Wants=network-online.target
+After=network-online.target
+# Stop retrying after 5 failed starts in 10 minutes (for example a rejected
+# API key) instead of hammering the exchange; fix the cause, then
+# `systemctl --user reset-failed crypto-ai-trader-mainnet` and start again.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# Edit these two lines if the repository lives elsewhere.
+WorkingDirectory=%h/git/crypto-ai-trader-main
+ExecStart=%h/git/crypto-ai-trader-main/build-linux/crypto-ai-trader --live config/mainnet.json
+# BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, one
+# KEY=value per line. Keep this file private: chmod 600.
+EnvironmentFile=%h/.config/crypto-ai-trader/mainnet.env
+Restart=always
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

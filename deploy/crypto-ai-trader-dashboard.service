@@ -1,0 +1,17 @@
+# systemd user service for the read-only dashboard. Install with
+#   bash deploy/install-dashboard.sh          (this computer only)
+#   bash deploy/install-dashboard.sh --lan    (also phones/PCs on your Wi-Fi, token-protected)
+# which fills in the paths below for the repository it is run from.
+[Unit]
+Description=Crypto AI Trader dashboard (read-only)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/git/crypto-ai-trader
+ExecStart=/usr/bin/python3 -I %h/git/crypto-ai-trader/scripts/dashboard.py config/testnet.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

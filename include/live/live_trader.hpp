@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,20 @@ struct LiveExecution {
     std::int64_t timestamp_ms;
 };
 
+// An entry order that was sent (or was about to be sent) to the venue but
+// whose result is not yet in the ledger. It is persisted before the order is
+// submitted, so a lost response or a crash right after the fill is found by
+// client order id on the next cycle and the position is recorded and
+// protected instead of being left untracked on the exchange.
+struct PendingEntry {
+    std::string symbol;
+    std::string client_order_id;
+    // ATR at venue prices when the order was sent; sets the initial stop.
+    double atr;
+    std::int64_t candle_ms;
+    std::int64_t created_at_ms;
+};
+
 struct LiveAccountView {
     double cash_balance;
     double capital_allocation;
@@ -60,6 +75,7 @@ struct LiveAccountView {
     double peak_equity;
     bool trading_halted;
     std::vector<LivePosition> positions;
+    std::optional<PendingEntry> pending_entry;
 };
 
 // Automated spot trader for an authenticated venue. Every position is
@@ -97,6 +113,7 @@ private:
         // Closed-candle time of the last entry per symbol, so a restart never
         // re-buys on a signal that was already acted on.
         std::map<std::string, std::int64_t> last_entry_candle_ms;
+        std::optional<PendingEntry> pending_entry;
     };
 
     double equity_unlocked() const;
@@ -112,6 +129,14 @@ private:
                          std::int64_t timestamp_ms, std::vector<LiveExecution>& executions);
     void open_position(const market::ScanResult& result, risk::RiskManager& risk_manager,
                        std::int64_t timestamp_ms, std::vector<LiveExecution>& executions);
+    // Books a filled entry into the ledger, clears the pending entry, and
+    // places the protective stop (selling immediately if that fails).
+    void record_entry(const std::string& symbol, const execution::VenueOrder& order,
+                      double atr, std::int64_t candle_ms, std::int64_t timestamp_ms,
+                      const std::string& reason, std::vector<LiveExecution>& executions);
+    // Returns true when no entry is pending any more.
+    bool resolve_pending_entry(std::int64_t timestamp_ms,
+                               std::vector<LiveExecution>& executions);
     std::vector<LiveExecution> flatten_unlocked(const std::string& reason,
                                                 std::int64_t timestamp_ms);
     void record(LiveExecution execution, std::vector<LiveExecution>& executions);
